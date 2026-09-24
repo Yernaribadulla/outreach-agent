@@ -52,6 +52,11 @@ class Database:
         CREATE TABLE IF NOT EXISTS suppression_list (
           email TEXT PRIMARY KEY, reason TEXT NOT NULL, created_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS discovery_runs (
+          run_id TEXT PRIMARY KEY, timestamp TEXT NOT NULL, vertical TEXT NOT NULL,
+          source TEXT NOT NULL, input_file TEXT NOT NULL, received INTEGER NOT NULL,
+          new_count INTEGER NOT NULL, duplicate_count INTEGER NOT NULL
+        );
         """)
         self._ensure_column("clinics", "profile_json", "TEXT DEFAULT '{}'" )
         self._ensure_column("contacts", "contact_type", "TEXT DEFAULT 'PUBLIC_BUSINESS_EMAIL'")
@@ -79,6 +84,9 @@ class Database:
         cur = self.conn.execute("""INSERT INTO clinics(name,website,city,country,category,phone,contact_page,description,source_url,collected_at,profile_json)
           VALUES(?,?,?,?,?,?,?,?,?,?,?)""", (clinic.get("name"), clinic.get("website"), clinic.get("city"), clinic.get("country"), clinic.get("category"), clinic.get("phone"), clinic.get("contact_page"), clinic.get("description"), clinic.get("source_url"), utc_now(), json.dumps(clinic.get("profile", clinic), ensure_ascii=False)))
         self.conn.commit(); return int(cur.lastrowid)
+
+    def list_discovery_runs(self) -> list[dict[str, Any]]:
+        return [dict(row) for row in self.conn.execute("SELECT * FROM discovery_runs ORDER BY timestamp DESC").fetchall()]
 
     def add_contact(self, clinic_id: int, email: str, source_url: str, kind: str = "business") -> int | None:
         try:

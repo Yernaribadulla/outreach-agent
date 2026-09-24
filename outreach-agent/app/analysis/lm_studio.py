@@ -42,6 +42,18 @@ class LMStudioClient:
         except Exception as exc:
             print(f"[LM] clinic={payload.get('clinic', {}).get('name', 'unknown')} model={self.model} latency={time.perf_counter()-started:.2f}s status=fail error={exc}", flush=True); raise
 
+    def chat_opportunity(self, payload: dict) -> dict:
+        prompt = ("Только JSON. Ты анализируешь B2B lead по переданным evidence. Никогда не выдумывай факты, владельцев, технологии или отсутствие функций. "
+                  "Разделяй CONFIRMED, INFERRED, UNKNOWN и NOT_DETECTED. Сохраняй evidence_ids. Верни ключи: company_summary, digital_state, priority, why_this_lead, recommended_angle, sales_brief. "
+                  "digital_state должен содержать website,mobile,online_booking,crm,ai_assistant,online_payment,automation; каждый объект: status, reason, evidence_ids, confidence. priority: score и website_opportunity,booking_opportunity,crm_opportunity,ai_opportunity,automation_opportunity. ")
+        body = {"model": self.model, "temperature": 0.0, "max_tokens": 900, "messages": [{"role": "user", "content": prompt + "\nEVIDENCE:\n" + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))}]}
+        data = self._request(body)
+        content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+        if isinstance(content, list): content = "".join(part.get("text", "") for part in content if isinstance(part, dict))
+        content = str(content).replace("```json", "").replace("```", "").strip(); start, end = content.find("{"), content.rfind("}")
+        if start < 0 or end < start: raise LMStudioError("opportunity response did not contain JSON")
+        return json.loads(content[start:end + 1])
+
     def health(self) -> dict:
         request = Request(self.base_url + "/models")
         with urlopen(request, timeout=5) as response: return json.loads(response.read().decode("utf-8"))

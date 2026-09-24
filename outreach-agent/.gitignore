@@ -4,4 +4,12 @@ __pycache__/
 .env
 data/*.db
 data/*.log
+data/leads.csv
+data/leads.json
+gemini_batch_*.json
+*.sqlite
+*.sqlite3
+*.db-journal
+*.db-wal
+*.db-shm
 !data/.gitkeep
