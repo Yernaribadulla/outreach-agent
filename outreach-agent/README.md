@@ -1,86 +1,174 @@
-# Outreach Agent
+# outreach-agent
 
-`outreach-agent` is a local-first B2B sales-intelligence and outreach pipeline. It discovers public businesses, preserves source evidence and provenance, audits websites, sends structured evidence to a local LM Studio model, qualifies digital opportunities, and prepares personalized outreach drafts for review.
+`outreach-agent` is a local-first B2B sales intelligence and outreach automation platform for discovering and researching potential business clients, building structured opportunity profiles, and preparing personalized outreach drafts.
 
-The project is provider-neutral and uses only public business information. It does not guess contacts, bypass CAPTCHA or anti-bot systems, or send email automatically during development.
+The current MVP is designed for public business information and local execution. It keeps discovery records, technical observations, evidence, provenance, AI analysis, and draft state together so that a human can review the result before any future sending step.
 
-## MVP architecture
+## What the MVP contains
+
+- Python application using the standard library;
+- SQLite storage for businesses, contacts, analyses, drafts, suppression, send logs, and discovery runs;
+- OpenStreetMap discovery using Nominatim and Overpass;
+- local LM Studio integration;
+- only the `qwen/qwen3-vl-8b` model is supported for the autonomous MVP;
+- deterministic website audit and public contact extraction;
+- entity resolution and deduplication;
+- evidence and source provenance;
+- configurable vertical definitions (`dental` is the current live vertical);
+- an autonomous MVP and dry-run workflow;
+- personalized outreach preparation without real email delivery.
+
+AI analysis is not a source of truth. It must use supplied evidence, preserve provenance, distinguish confirmed and unknown states, and never invent contacts, websites, owners, technologies, or business problems.
+
+## Pipeline
 
 ```text
-OpenStreetMap / Nominatim / Overpass
-        ↓
-SQLite
-        ↓
-Research
-        ↓
-Website audit / evidence
-        ↓
-Local LM Studio
-        ↓
-Opportunity qualification
-        ↓
-Email draft validation
+Discovery
+    → Entity Resolution
+    → Research
+    → Website Audit
+    → Evidence / Provenance
+    → AI Analysis
+    → Qualification
+    → Outreach Draft
+    → Human Review
+    → Future Sending
 ```
 
-The current implementation includes OpenStreetMap discovery through Nominatim and Overpass, provider-neutral discovery and entity resolution, SQLite persistence, deterministic website audit and public contact extraction, Gemini discovery JSON import with provenance, local LM Studio analysis, and review-oriented draft/safety boundaries.
+Deterministic facts are collected and checked in Python where possible. LM Studio is used for semantic opportunity analysis and draft generation after the evidence object has been assembled.
 
-## Local LM Studio
+## Current Status
 
-LM Studio is used locally at `http://127.0.0.1:1234/v1` with the required model `qwen/qwen3-vl-8b`. No fallback model is configured by this project.
+**Active development / MVP stage — not production-ready.**
+
+The OpenStreetMap discovery layer is operational and has been tested against live Nominatim and Overpass services. SQLite storage works, local LM Studio integration is implemented, and the autonomous pipeline exists in MVP/dry-run form.
+
+The complete overnight workflow still has important limitations:
+
+- public web and business providers can return `CAPTCHA`, anti-bot challenges, or `SOURCE_UNAVAILABLE`;
+- large-scale automated web research and website auditing can be slow and are not yet reliably unattended;
+- OpenStreetMap is the current working free discovery source and does not provide complete contact or website coverage;
+- checkpoint/resume is not yet a complete overnight workflow;
+- batch resilience and diagnostics for individual pipeline errors are still being improved;
+- real email sending is not a guaranteed or production-ready feature of this project.
+
+The project intentionally does not bypass CAPTCHA or anti-bot protection, use stealth plugins, or use proxies to evade access controls.
+
+## Installation
+
+Prerequisites:
+
+- Windows;
+- Python 3.14+ (the code uses only the Python standard library; `requirements.txt` documents this);
+- Git;
+- LM Studio if AI analysis is required;
+- a locally available `qwen/qwen3-vl-8b` model in LM Studio.
+
+Clone the repository and create a virtual environment:
+
+```powershell
+git clone https://github.com/Yernaribadulla/outreach-agent.git
+cd outreach-agent
+python -m venv .venv
+.venv\Scripts\activate
+```
+
+No third-party installation is required by the current `requirements.txt`.
+
+## LM Studio
+
+For AI analysis:
+
+1. Start LM Studio.
+2. Load `qwen/qwen3-vl-8b`.
+3. Start the local OpenAI-compatible API server.
+4. Keep the server available at `http://127.0.0.1:1234/v1`.
+
+The autonomous implementation uses this endpoint and this model. No fallback model is configured.
 
 ## Discovery
 
-The current live discovery provider is OpenStreetMap via Nominatim and Overpass:
+Run live dental discovery through OpenStreetMap/Nominatim/Overpass:
 
 ```powershell
 python -m app.cli discover --vertical dental --city Астана --target 100 --provider osm
 ```
 
-The command records public discovery evidence, resolves duplicates, stores results in the existing SQLite database, and reports provider statistics. Missing fields remain unknown; OSM claims are discovery evidence, not automatically verified facts.
+The command resolves the city through Nominatim, queries Overpass for `amenity=dentist` and `healthcare=dentist`, normalizes public fields, resolves duplicates, stores OSM discovery records in the existing SQLite database, and reports provider statistics. Missing fields remain `null`; OSM claims are discovery evidence, not automatically verified facts.
 
-Gemini discovery JSON can also be imported explicitly without starting providers or AI analysis:
-
-```powershell
-python -m app.cli import-discovery --vertical dental --file gemini_batch_001.json
-```
+The repository also retains HTTP and browser provider implementations for explicit diagnostics. Providers may report `SOURCE_UNAVAILABLE` when public access is blocked or unreliable.
 
 ## Autonomous dry-run
 
-The autonomous command prepares research and drafts without sending real email:
+Prepare a local autonomous run without sending email:
 
 ```powershell
 python -m app.cli autonomous --vertical dental --city Астана --target 5 --dry-run
 ```
 
-## Current Status
+The MVP orchestration uses OSM discovery, website research/audit, local LM Studio analysis, and draft validation. It is intended for development and review, not mass outreach.
 
-This project is currently under active development. The discovery layer is operational and has been tested against live OpenStreetMap/Nominatim/Overpass services. The autonomous pipeline MVP is implemented, but the full overnight workflow is not yet considered production-ready.
+## Gemini discovery import
 
-Current limitations:
-
-- discovery works and persists records in the existing SQLite database;
-- autonomous dry-run starts and processes independent leads;
-- website audit and research can take significant time for a large batch;
-- checkpoint/resume is not yet a complete overnight workflow;
-- individual pipeline error diagnostics and batch resilience are still being improved;
-- real email sending is not a guaranteed or production-ready project capability.
-
-## Safety / Sending
-
-Current validation is performed in dry-run mode. No real email sends have been performed during development or testing. Email sending is not considered a production-ready workflow.
-
-Credentials and secrets must remain outside Git. Do not commit `.env`, SMTP passwords, API keys, tokens, or local secret files. SMTP is disabled by default, and the simulated sender must not be confused with real delivery.
-
-## Development
+Gemini discovery JSON can be imported as an input adapter:
 
 ```powershell
-python -m compileall -q app tests
+python -m app.cli import-discovery --vertical dental --file gemini_batch_001.json
+```
+
+Imported records retain `gemini_discovery` provenance and are not treated as verified automatically. SQLite/source evidence remains the source of truth; imported businesses should pass subsequent verification and audit steps.
+
+## Email Safety
+
+- Real email sending is disabled/not implemented for the current MVP workflow.
+- Human review is required before any future sending step.
+- Suppression and duplicate-recipient checks are part of the safety boundary and must be preserved.
+- Discovery and development testing must not send email.
+- SMTP credentials, API keys, passwords, tokens, and `.env` files must never be committed to Git.
+- Local SQLite data and historical records must not be deleted as part of normal development.
+
+The existing simulated sender is not real delivery. Do not treat a successful simulated operation as proof that production sending is ready.
+
+## Project structure
+
+```text
+app/
+├── cli.py                         CLI commands and output
+├── autonomous.py                  MVP autonomous orchestration and draft validation
+├── verticals.py                   Vertical configuration
+├── website_audit.py               Deterministic website checks
+├── analysis/lm_studio.py          Local LM Studio client and JSON analysis
+├── discovery/                     Providers, engine, resolution, import, datasets
+├── extraction/public_page.py      Public-page text and business email extraction
+├── generation/email_draft.py      Structured draft generation
+├── storage/db.py                  SQLite schema and persistence methods
+├── email/sender.py                Simulated and guarded SMTP providers
+└── ui/                            Existing local UI package
+tests/                             Discovery, audit, import, and safety tests
+```
+
+## Tests and checks
+
+Run the current checks from the repository root:
+
+```powershell
 python -m unittest discover -s tests -v
+python -m compileall -q app tests
 git diff --check
 ```
 
-The tests cover provider failure handling, entity resolution, provenance, website audit behavior, Gemini import behavior, LM response parsing, suppression, and sender safety boundaries.
+The test count can change as the MVP evolves. The suite covers provider failure handling, entity resolution, provenance, website audit behavior, Gemini import behavior, LM response parsing, suppression, simulated sending, and sender safety boundaries.
 
-## Privacy and source policy
+## Roadmap
 
-Only public business information should be collected. The project must not guess email addresses, use private personal data, bypass CAPTCHA/anti-bot controls, or treat an unverified discovery claim as a confirmed fact. Useful claims should retain their source URL and confidence/status where available.
+- more reliable batch web research;
+- complete checkpoint/resume for overnight runs;
+- improved per-lead error diagnostics;
+- more resilient website auditing;
+- richer evidence and provenance views;
+- deeper opportunity qualification;
+- stronger human review UI;
+- reply intelligence;
+- production-grade sending only after separate validation of transport, limits, suppression, and review controls.
+
+No delivery timeline is implied by this roadmap.
