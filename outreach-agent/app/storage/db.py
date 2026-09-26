@@ -180,6 +180,10 @@ class Database:
         events = []
         for row in self.conn.execute("SELECT name clinic_name,collected_at timestamp,'DISCOVERED' type FROM clinics ORDER BY collected_at DESC LIMIT 10"):
             events.append(dict(row))
+        for row in self.conn.execute("SELECT c.name clinic_name,a.created_at timestamp,'AI_ANALYSIS_COMPLETED' type FROM analyses a JOIN clinics c ON c.id=a.clinic_id ORDER BY a.created_at DESC LIMIT 10"):
+            events.append(dict(row))
+        for row in self.conn.execute("SELECT c.name clinic_name,d.created_at timestamp,'EMAIL_DRAFT_GENERATED' type FROM drafts d JOIN clinics c ON c.id=d.clinic_id ORDER BY d.created_at DESC LIMIT 10"):
+            events.append(dict(row))
         for row in self.conn.execute("SELECT recipient clinic_name,created_at timestamp,status type FROM send_logs ORDER BY created_at DESC LIMIT 10"):
             events.append(dict(row))
         return sorted(events, key=lambda x: x["timestamp"], reverse=True)[:10]

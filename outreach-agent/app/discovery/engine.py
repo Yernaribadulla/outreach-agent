@@ -15,7 +15,7 @@ import time
 def _official_candidate(entity: dict) -> str | None:
     urls = [entity.get("website"), entity.get("source_url")]
     urls.extend(x.get("source_url", "") for x in entity.get("sources", []) if isinstance(x, dict))
-    blocked = ("2gis.", "yandex.", "google.", "bing.")
+    blocked = ("2gis.", "yandex.", "google.", "bing.", "openstreetmap.org", "nominatim.openstreetmap.org", "103.kz", "kliniki.kz", "instagram.com", "facebook.com")
     for url in urls:
         host = urlparse(url or "").netloc.lower()
         if host and not any(part in host for part in blocked): return url

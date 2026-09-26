@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Protocol
 from html import unescape
-from urllib.parse import quote, urljoin, urlparse
+from urllib.parse import quote, urljoin, urlparse, parse_qs
 from urllib.request import Request, urlopen
 import re
 import time
@@ -79,11 +79,14 @@ class OpenStreetMapProvider:
     def extract_contacts(self, result: dict[str, Any]) -> list[dict[str, Any]]: return result.get("contacts", [])
 
 
-def _get(url: str, timeout: int = 12) -> tuple[str, str]:
+def _get(url: str, timeout: int = 12, headers: dict[str, str] | None = None) -> tuple[str, str]:
     started = time.perf_counter(); host = urlparse(url).netloc
     print(f"[DISCOVERY] HTTP start provider_domain={host} timeout={timeout}s url={url}", flush=True)
     try:
-        request = Request(url, headers={"User-Agent": "B2B-Lead-Research/1.0"})
+        request_headers = {"User-Agent": "B2B-Lead-Research/1.0"}
+        if headers:
+            request_headers.update(headers)
+        request = Request(url, headers=request_headers)
         with urlopen(request, timeout=timeout) as response:
             body = response.read(800_000).decode("utf-8", errors="ignore")
             print(f"[DISCOVERY] HTTP finish provider_domain={host} status={getattr(response, 'status', 200)} elapsed={time.perf_counter()-started:.2f}s", flush=True)
@@ -142,6 +145,53 @@ class WebProvider(_SearchProvider):
     name = "web"
     search_url = "https://www.google.com/search?q={query}"
     result_pattern = re.compile(r'<a[^>]+href="(?P<url>https?://[^"&]+)"[^>]*>\s*(?P<name>.*?)</a>', re.I | re.S)
+
+
+class DuckDuckGoProvider(_SearchProvider):
+    """Public HTML search adapter; no API, browser automation, or bypasses."""
+    name = "duckduckgo"
+    search_url = "https://html.duckduckgo.com/html/?q={query}"
+    result_pattern = re.compile(
+        r'<a[^>]+class="[^"]*result__a[^"]*"[^>]+href="(?P<url>[^"]+)"[^>]*>(?P<name>.*?)</a>',
+        re.I | re.S,
+    )
+
+    def search(self, query: str, target_count: int = 10) -> list[dict[str, Any]]:
+        url = self.search_url.format(query=quote(query))
+        html, final_url = _get(url, timeout=12, headers={
+            "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.7",
+            "Referer": "https://duckduckgo.com/",
+        })
+        results = []
+        seen = set()
+        for match in self.result_pattern.finditer(html):
+            name = _clean(match.groupdict().get("name", ""))
+            href = unescape(match.groupdict().get("url", ""))
+            if href.startswith("//"):
+                href = "https:" + href
+            parsed = urlparse(href)
+            redirected = parse_qs(parsed.query).get("uddg", [None])[0]
+            if redirected:
+                href = redirected
+            host = urlparse(href).netloc.lower().removeprefix("www.")
+            if not href.startswith(("http://", "https://")) or not host or host in seen:
+                continue
+            if not _usable_result(name, href) or host in {
+                "duckduckgo.com", "103.kz", "2gis.kz", "yandex.kz", "google.com",
+            }:
+                continue
+            seen.add(host)
+            results.append({
+                "name": name[:180], "website": href, "source": self.name,
+                "source_mode": "live", "source_url": href,
+                "description": name[:500],
+                "sources": [{"source": self.name, "source_url": href, "source_mode": "live"}],
+            })
+            if len(results) >= target_count:
+                break
+        if not results:
+            raise SourceUnavailable(f"{self.name}: no parseable direct business results from {final_url}")
+        return results
 
 
 class YandexProvider(_SearchProvider):

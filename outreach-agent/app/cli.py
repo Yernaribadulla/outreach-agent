@@ -9,7 +9,7 @@ from html import escape
 from pathlib import Path
 
 from .discovery.engine import discover
-from .discovery.providers import PublicSourceProvider, TwoGISProvider, YandexProvider, WebProvider, PlaywrightTwoGISProvider, PlaywrightWebProvider, OpenStreetMapProvider
+from .discovery.providers import PublicSourceProvider, TwoGISProvider, YandexProvider, WebProvider, DuckDuckGoProvider, PlaywrightTwoGISProvider, PlaywrightWebProvider, OpenStreetMapProvider
 from .discovery.real_candidates import REAL_ASTANA_CANDIDATES
 from .verticals import get_vertical
 from .analysis.lm_studio import LMStudioClient, LMStudioError
@@ -22,7 +22,7 @@ from .storage.db import Database
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Local B2B Lead Discovery & Outreach Agent")
     sub = parser.add_subparsers(dest="command", required=True)
-    d = sub.add_parser("discover"); d.add_argument("--vertical", default="dental"); d.add_argument("--target", type=int, default=10); d.add_argument("--city", default="Астана"); d.add_argument("--out", default="data"); d.add_argument("--mode", choices=("live", "offline"), default="live"); d.add_argument("--provider", choices=("default", "osm", "playwright_2gis", "playwright_web"), default="default"); d.add_argument("--research", action="store_true")
+    d = sub.add_parser("discover"); d.add_argument("--vertical", default="dental"); d.add_argument("--target", type=int, default=10); d.add_argument("--city", default="Астана"); d.add_argument("--out", default="data"); d.add_argument("--mode", choices=("live", "offline"), default="live"); d.add_argument("--provider", choices=("default", "fallback", "osm", "playwright_2gis", "playwright_web"), default="default"); d.add_argument("--research", action="store_true")
     p = sub.add_parser("probe"); p.add_argument("--provider", choices=("2gis", "yandex", "web"), required=True); p.add_argument("--city", default="Астана"); p.add_argument("--query", default="стоматология"); p.add_argument("--target", type=int, default=5)
     i = sub.add_parser("import-discovery"); i.add_argument("--vertical", default="dental"); i.add_argument("--file", required=True); i.add_argument("--db", default="data/outreach.db")
     a = sub.add_parser("autonomous"); a.add_argument("--vertical", default="dental"); a.add_argument("--city", default="Астана"); a.add_argument("--target", type=int, default=100); a.add_argument("--db", default="data/outreach.db"); a.add_argument("--dry-run", action="store_true"); a.add_argument("--send", action="store_true")
@@ -63,7 +63,9 @@ def main(argv: list[str] | None = None) -> int:
     vertical = get_vertical(args.vertical)
     if vertical.key != "dental":
         print(f"Vertical {vertical.key} configured, but no live provider records are enabled yet.", file=sys.stderr); return 2
-    if getattr(args, "provider", "default") == "osm":
+    if getattr(args, "provider", "default") == "fallback":
+        providers = [OpenStreetMapProvider(), DuckDuckGoProvider(), WebProvider(), YandexProvider(), TwoGISProvider()]
+    elif getattr(args, "provider", "default") == "osm":
         providers = [OpenStreetMapProvider()]
     elif args.mode == "offline":
         providers = [PublicSourceProvider("reviewed project records", REAL_ASTANA_CANDIDATES)]
