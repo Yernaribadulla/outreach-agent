@@ -65,6 +65,13 @@ class Database:
         self._ensure_column("contacts", "is_public", "INTEGER DEFAULT 1")
         self._ensure_column("drafts", "html_body", "TEXT DEFAULT ''")
         self._ensure_column("drafts", "plain_text_body", "TEXT DEFAULT ''")
+        self._ensure_column("discovery_runs", "status", "TEXT DEFAULT 'DISCOVERED'")
+        self._ensure_column("discovery_runs", "target", "INTEGER DEFAULT 0")
+        self._ensure_column("discovery_runs", "discovered", "INTEGER DEFAULT 0")
+        self._ensure_column("discovery_runs", "researched", "INTEGER DEFAULT 0")
+        self._ensure_column("discovery_runs", "qualified", "INTEGER DEFAULT 0")
+        self._ensure_column("discovery_runs", "started_at", "TEXT")
+        self._ensure_column("discovery_runs", "updated_at", "TEXT")
         self.conn.execute("UPDATE drafts SET status='SENT', updated_at=? WHERE id IN (SELECT draft_id FROM send_logs WHERE status='SENT' AND draft_id IS NOT NULL)", (utc_now(),))
         self.conn.commit()
 
@@ -87,6 +94,24 @@ class Database:
 
     def list_discovery_runs(self) -> list[dict[str, Any]]:
         return [dict(row) for row in self.conn.execute("SELECT * FROM discovery_runs ORDER BY timestamp DESC").fetchall()]
+
+    def create_autonomous_run(self, run_id: str, vertical: str, target: int, discovered: int = 0) -> None:
+        now = utc_now()
+        self.conn.execute("INSERT INTO discovery_runs(run_id,timestamp,vertical,source,input_file,received,new_count,duplicate_count,status,target,discovered,researched,qualified,started_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (run_id, now, vertical, "openstreetmap", "autonomous", discovered, 0, 0, "DISCOVERED", target, discovered, 0, 0, now, now)); self.conn.commit()
+
+    def update_autonomous_run(self, run_id: str, **fields: Any) -> None:
+        allowed = {k: v for k, v in fields.items() if k in {"status", "discovered", "researched", "qualified"}}
+        if not allowed: return
+        allowed["updated_at"] = utc_now()
+        values = list(allowed.values()) + [run_id]
+        self.conn.execute(f"UPDATE discovery_runs SET {', '.join(k+'=?' for k in allowed)} WHERE run_id=?", values); self.conn.commit()
+
+    def update_clinic_status(self, clinic_id: int, status: str, profile: dict[str, Any] | None = None) -> None:
+        if profile is None:
+            self.conn.execute("UPDATE clinics SET status=?, collected_at=? WHERE id=?", (status, utc_now(), clinic_id))
+        else:
+            self.conn.execute("UPDATE clinics SET status=?, profile_json=?, collected_at=? WHERE id=?", (status, json.dumps(profile, ensure_ascii=False), utc_now(), clinic_id))
+        self.conn.commit()
 
     def add_contact(self, clinic_id: int, email: str, source_url: str, kind: str = "business") -> int | None:
         try:

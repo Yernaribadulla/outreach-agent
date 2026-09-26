@@ -15,7 +15,7 @@ from .verticals import get_vertical
 from .analysis.lm_studio import LMStudioClient, LMStudioError
 from .generation.email_draft import generate_draft
 from .discovery.gemini_import import import_gemini_file
-from .autonomous import run_autonomous
+from .autonomous import MODEL, run_autonomous
 from .storage.db import Database
 
 
@@ -93,7 +93,9 @@ def main(argv: list[str] | None = None) -> int:
         base_url = None
     else:
         base_url = os.environ.get("LM_STUDIO_BASE_URL", "http://127.0.0.1:1234/v1")
-    model = os.environ.get("LM_STUDIO_MODEL", "local-model")
+    model = os.environ.get("LM_STUDIO_MODEL", MODEL)
+    if model != MODEL and args.research:
+        print(json.dumps({"status": "AI_UNAVAILABLE", "error": f"Only {MODEL} is supported"}, ensure_ascii=False)); return 2
     try:
         if base_url is None: raise LMStudioError("research stage not requested")
         client = LMStudioClient(base_url, model); client.health()
