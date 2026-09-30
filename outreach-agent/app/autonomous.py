@@ -9,6 +9,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from .analysis.lm_studio import LMStudioClient, LMStudioError
+from .analysis.context import build_llm_context, deduplicate_evidence
 from .discovery.engine import discover
 from .discovery.providers import OpenStreetMapProvider
 from .email.sender import SendError
@@ -39,20 +40,26 @@ CLAIM_TERMS = {
 
 def prepare_evidence(payload: dict[str, Any]) -> list[dict[str, Any]]:
     company = payload.get("company") or {}
-    records = []
-    for index, raw in enumerate(payload.get("evidence") or [], 1):
-        item = dict(raw) if isinstance(raw, dict) else {"fact": str(raw)}
-        item.setdefault("evidence_id", f"ev-{index:03d}")
+    records = deduplicate_evidence(payload.get("evidence") or [])
+    used_ids = set()
+    for index, item in enumerate(records, 1):
+        evidence_id = str(item.get("evidence_id") or f"ev-{index:03d}")
+        if evidence_id in used_ids:
+            evidence_id = f"ev-{index:03d}"
+        while evidence_id in used_ids:
+            index += 1
+            evidence_id = f"ev-{index:03d}"
+        item["evidence_id"] = evidence_id
+        used_ids.add(evidence_id)
         item["source"] = item.get("source") or item.get("source_url")
         explicit_owner = item.get("company_name") or item.get("company")
         if explicit_owner and str(explicit_owner).strip().casefold() != str(company.get("name") or "").strip().casefold():
             raise EvidenceValidationError(f"Evidence {item['evidence_id']} belongs to another company")
-        records.append(item)
     payload["evidence"] = records
     return records
 
 
-def validate_analysis(payload: dict[str, Any], analysis: dict[str, Any]) -> dict[str, Any]:
+def validate_analysis(payload: dict[str, Any], analysis: dict[str, Any], allowed_evidence_ids: set[str] | None = None) -> dict[str, Any]:
     """Bind model claims to source-backed evidence and prevent unsupported confirmations."""
     if not isinstance(analysis, dict):
         raise EvidenceValidationError("LM response must be a JSON object")
@@ -111,7 +118,7 @@ def validate_analysis(payload: dict[str, Any], analysis: dict[str, Any]) -> dict
         refs = claim.get("evidence_ids") or []
         if not isinstance(refs, list):
             raise EvidenceValidationError(f"Evidence IDs for {key} must be a list")
-        unknown_ids = [item for item in refs if item not in indexed]
+        unknown_ids = [item for item in refs if item not in indexed or (allowed_evidence_ids is not None and item not in allowed_evidence_ids)]
         if unknown_ids:
             raise EvidenceValidationError(f"Unknown evidence ID for {key}: {unknown_ids[0]}")
         usable_refs = []
@@ -191,7 +198,10 @@ def run_autonomous(vertical: str, city: str, target: int, db_path: str, dry_run:
             db.update_autonomous_run(run_id, researched=stats["researched"])
             payload = {"company": {k: lead.get(k) for k in ("name", "city", "address", "website")}, "sources": lead.get("sources", []), "contacts": lead.get("contacts", []), "website_resolution": lead.get("website_resolution", {}), "website_audit": lead.get("website_audit", {}), "evidence": lead.get("evidence", [])}
             stage = "AI_ANALYSIS"
-            analysis = validate_analysis(payload, client.chat_opportunity(payload)); db.add_analysis(clinic_id, MODEL, payload, analysis)
+            prepare_evidence(payload)
+            model_context = build_llm_context(payload, vertical_config.opportunity_signals)
+            model_evidence_ids = {str(item["evidence_id"]) for item in model_context["key_evidence"]}
+            analysis = validate_analysis(payload, client.chat_opportunity(model_context), model_evidence_ids); db.add_analysis(clinic_id, MODEL, payload, analysis)
             lead["evidence"] = payload["evidence"]
             qualification = qualify_lead(lead, analysis, vertical_config)
             lead["qualification"] = qualification

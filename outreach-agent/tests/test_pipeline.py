@@ -63,6 +63,17 @@ class OutreachSafetyTests(unittest.TestCase):
             self.assertEqual(detail["clinic"]["profile"]["contacts"][0]["email"], "hello@detail.example")
             db.close()
 
+    def test_rediscovery_collapses_same_claim_and_url_but_preserves_other_sources(self):
+        with tempfile.TemporaryDirectory() as folder:
+            db = Database(Path(folder) / "test.db")
+            repeated = {"type": "booking", "fact": "Booking action detected", "snippet": "Book now", "source": "https://clinic.example/booking", "status": "CONFIRMED"}
+            clinic_id = db.add_clinic({"name": "Evidence Merge Fixture", "city": "Test", "profile": {"evidence": [{**repeated, "evidence_id": "ev-1"}]}})
+            db.add_clinic({"name": "Evidence Merge Fixture", "city": "Test", "profile": {"evidence": [{**repeated, "evidence_id": "ev-2", "observed_at": "later"}, {**repeated, "source": "https://directory.example/clinic", "evidence_id": "ev-3"}]}})
+            saved = db.clinic_detail(clinic_id)["evidence"]
+            self.assertEqual(len(saved), 2)
+            self.assertEqual({item["source"] for item in saved}, {"https://clinic.example/booking", "https://directory.example/clinic"})
+            db.close()
+
     def test_startup_preserves_existing_sent_timestamp(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "startup.db"

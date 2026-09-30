@@ -32,3 +32,17 @@
 .workflow-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;margin:18px 0}.workflow-grid>.surface{min-width:0}.workflow-grid h2{font-size:21px;margin:7px 0}.workflow-form{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;align-items:end;margin:18px 0}.workflow-form label{display:grid;gap:5px;color:var(--muted);font-size:11px}.workflow-form input,.workflow-form select{width:100%;min-width:0;padding:10px;border:1px solid var(--line);border-radius:9px;background:var(--bg);color:var(--text)}.workflow-form button{min-height:42px}.workflow-form>span{font-size:11px}.ready-count{padding:12px;border:1px solid var(--line);border-radius:10px}.ready-count b{font-size:22px;color:var(--good)}.job-monitor{margin-top:16px}.job-summary{display:grid;gap:8px;padding:14px;border:1px solid var(--line);border-radius:12px;background:#ffffff03}.job-summary>span{color:var(--muted);font-size:12px}.job-summary details{margin-top:8px}.job-summary summary{cursor:pointer;color:var(--accent)}.job-items{display:grid;gap:8px;padding-left:18px}.job-items li{overflow-wrap:anywhere;font-size:12px}.job-items small{display:block;color:var(--danger)}.send-form{grid-template-columns:repeat(2,minmax(0,1fr))}.review-row>div{min-width:0}.review-row small{display:block;color:var(--muted);overflow-wrap:anywhere}.confirm-actions{display:flex;justify-content:flex-end;gap:9px;flex-wrap:wrap}.send-confirm-modal{width:min(520px,100%)}.evidence-modal ul{padding-left:20px}.email-review{overflow-wrap:anywhere}.email-content{min-width:0;overflow:auto}.html-frame{max-width:100%}.badge.sending,.badge.analyzing,.badge.generating_letter,.badge.running{color:var(--accent)}.badge.send_failed,.badge.failed,.badge.send_interrupted,.badge.stopped_provider_rejection,.badge.stopped_provider_limit,.badge.stopped_auth_error{color:var(--danger)}.badge.letter_done,.badge.ready_to_send{color:var(--good)}
 @media(max-width:900px){.workflow-grid{grid-template-columns:1fr}}
 @media(max-width:650px){.workflow-grid{grid-template-columns:minmax(0,1fr)}.workflow-form,.send-form{grid-template-columns:minmax(0,1fr)}.workflow-grid,.workflow-grid>.surface,.job-summary{min-width:0}.confirm-actions{justify-content:stretch}.confirm-actions button{flex:1}}
+.review-candidate{grid-template-columns:auto minmax(0,1fr) auto;align-items:start}
+.candidate-select{padding:.35rem .15rem 0;flex:0 0 auto}
+.candidate-select input{width:1.15rem;height:1.15rem;accent-color:var(--accent)}
+.candidate-main{min-width:0;overflow-wrap:anywhere}
+.candidate-main h3{display:inline-block;margin:.2rem .4rem}
+.candidate-main p{margin:.45rem 0}
+.candidate-main small{display:block;margin-top:.4rem}
+.candidate-why{max-width:75ch}
+.not-send-eligible{opacity:.78}
+.selection-toolbar{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:.75rem;margin:1rem 0;padding:1rem;border:1px solid var(--line);border-radius:1rem;background:var(--surface)}
+.selection-toolbar>div{display:flex;flex-wrap:wrap;gap:.5rem}
+.send-selection{margin:1.25rem 0}
+.send-selection .workflow-form{margin:1rem 0}
+@media(max-width:650px){.review-candidate{grid-template-columns:auto minmax(0,1fr)}.review-candidate>.button{grid-column:2;justify-self:start}.selection-toolbar{align-items:flex-start}.candidate-main h3{margin-left:0}}

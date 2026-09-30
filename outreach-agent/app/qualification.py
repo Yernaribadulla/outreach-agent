@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import Any
 from urllib.parse import urlparse
 
@@ -33,16 +34,21 @@ def qualify_lead(lead: dict[str, Any], analysis: dict[str, Any], vertical: str |
         and bool(contact.get("source") or contact.get("source_url"))
         for contact in contacts
     )
+    raw_confidence = analysis.get("confidence")
     try:
-        confidence = float(analysis.get("confidence", 0))
+        confidence = float(raw_confidence)
+        confidence_available = math.isfinite(confidence) and not isinstance(raw_confidence, bool)
+        if not confidence_available: confidence = 0.0
     except (TypeError, ValueError):
         confidence = 0.0
+        confidence_available = False
 
     factors = {
         "icp_fit": icp_fit,
         "evidence_quality": evidence_quality,
         "opportunity_fit": opportunity_fit,
         "contactability": contactability,
+        "confidence_available": confidence_available,
         "outreach_confidence": confidence,
     }
     reasons = []
@@ -54,7 +60,8 @@ def qualify_lead(lead: dict[str, Any], analysis: dict[str, Any], vertical: str |
         if not evidence_quality: reasons.append("Нет пригодного подтверждённого evidence с публичным источником.")
         if not opportunity_fit: reasons.append("Возможность для выбранного vertical не подтверждена AI evidence.")
         if not contactability: reasons.append("Не найден публичный контакт с provenance.")
-        if confidence < 0.65: reasons.append("Уверенность outreach ниже порога 0.65.")
-        status = "QUALIFIED" if icp_fit is True and evidence_quality and opportunity_fit and contactability and confidence >= 0.65 else "NEEDS_REVIEW"
+        if not confidence_available: reasons.append("AI-анализ не содержит корректной числовой confidence; нужна ручная проверка.")
+        elif confidence < 0.65: reasons.append("Уверенность outreach ниже порога 0.65.")
+        status = "QUALIFIED" if icp_fit is True and evidence_quality and opportunity_fit and contactability and confidence_available and confidence >= 0.65 else "NEEDS_REVIEW"
         if status == "QUALIFIED": reasons.append("ICP, evidence, opportunity, публичный контакт и confidence прошли заданные правила.")
     return {"status": status, "factors": factors, "reasons": reasons, "rules_version": 1}

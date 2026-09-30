@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from ..analysis.context import deduplicate_evidence
+
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -64,7 +66,12 @@ class Database:
           analyzed_count INTEGER NOT NULL DEFAULT 0, qualified_count INTEGER NOT NULL DEFAULT 0,
           letters_generated INTEGER NOT NULL DEFAULT 0, needs_review INTEGER NOT NULL DEFAULT 0,
           failed INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL, started_at TEXT NOT NULL,
-          finished_at TEXT, current_company TEXT, current_stage TEXT, error_details TEXT NOT NULL DEFAULT '[]'
+          finished_at TEXT, current_company TEXT, current_stage TEXT, error_details TEXT NOT NULL DEFAULT '[]',
+          batch_type TEXT NOT NULL DEFAULT 'ANALYSIS', city TEXT NOT NULL DEFAULT '',
+          discovered_count INTEGER NOT NULL DEFAULT 0, researched_count INTEGER NOT NULL DEFAULT 0,
+          drafts_count INTEGER NOT NULL DEFAULT 0, ready_count INTEGER NOT NULL DEFAULT 0,
+          error_count INTEGER NOT NULL DEFAULT 0, progress INTEGER NOT NULL DEFAULT 0,
+          stop_requested INTEGER NOT NULL DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS batch_items (
           id INTEGER PRIMARY KEY AUTOINCREMENT, batch_id TEXT NOT NULL REFERENCES batch_jobs(batch_id),
@@ -80,7 +87,8 @@ class Database:
           max_delay_seconds INTEGER NOT NULL, max_per_batch INTEGER NOT NULL,
           daily_limit INTEGER NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL,
           confirmed_at TEXT, started_at TEXT, finished_at TEXT, current_company TEXT,
-          current_stage TEXT, error_details TEXT NOT NULL DEFAULT '[]'
+          current_stage TEXT, error_details TEXT NOT NULL DEFAULT '[]',
+          current_recipient TEXT, next_send_at TEXT, stop_requested INTEGER NOT NULL DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS send_items (
           id INTEGER PRIMARY KEY AUTOINCREMENT, send_id TEXT NOT NULL REFERENCES send_jobs(send_id),
@@ -95,6 +103,10 @@ class Database:
         );
         CREATE TABLE IF NOT EXISTS provider_cooldowns (
           provider TEXT PRIMARY KEY, cooldown_until TEXT NOT NULL, reason TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS review_selections (
+          draft_id INTEGER PRIMARY KEY REFERENCES drafts(id), selected INTEGER NOT NULL DEFAULT 1,
+          updated_at TEXT NOT NULL
         );
         CREATE UNIQUE INDEX IF NOT EXISTS one_running_analysis_batch ON batch_jobs(status) WHERE status='RUNNING';
         CREATE UNIQUE INDEX IF NOT EXISTS one_active_send_batch ON send_jobs(status) WHERE status IN ('RUNNING','SEND_INTERRUPTED');
@@ -114,6 +126,19 @@ class Database:
         self._ensure_column("discovery_runs", "started_at", "TEXT")
         self._ensure_column("discovery_runs", "updated_at", "TEXT")
         self._ensure_column("discovery_runs", "result_json", "TEXT DEFAULT '{}'")
+        batch_columns = {
+            "batch_type": "TEXT NOT NULL DEFAULT 'ANALYSIS'", "city": "TEXT NOT NULL DEFAULT ''",
+            "country": "TEXT NOT NULL DEFAULT ''", "market": "TEXT NOT NULL DEFAULT ''",
+            "outreach_language": "TEXT NOT NULL DEFAULT ''",
+            "discovered_count": "INTEGER NOT NULL DEFAULT 0", "researched_count": "INTEGER NOT NULL DEFAULT 0",
+            "drafts_count": "INTEGER NOT NULL DEFAULT 0", "ready_count": "INTEGER NOT NULL DEFAULT 0",
+            "error_count": "INTEGER NOT NULL DEFAULT 0", "progress": "INTEGER NOT NULL DEFAULT 0",
+            "stop_requested": "INTEGER NOT NULL DEFAULT 0",
+        }
+        for column, definition in batch_columns.items(): self._ensure_column("batch_jobs", column, definition)
+        send_columns = {"current_recipient": "TEXT", "next_send_at": "TEXT", "stop_requested": "INTEGER NOT NULL DEFAULT 0"}
+        for column, definition in send_columns.items(): self._ensure_column("send_jobs", column, definition)
+        self.conn.execute("INSERT OR IGNORE INTO review_selections(draft_id,selected,updated_at) SELECT id,1,? FROM drafts WHERE status IN ('DRAFTED','APPROVED')", (utc_now(),))
         # Correct legacy status without rewriting the timestamp of already-SENT drafts.
         self.conn.execute("UPDATE drafts SET status='SENT' WHERE status!='SENT' AND id IN (SELECT draft_id FROM send_logs WHERE status='SENT' AND draft_id IS NOT NULL)")
         self.conn.commit()
@@ -126,15 +151,20 @@ class Database:
         self.conn.close()
 
     def add_clinic(self, clinic: dict[str, Any]) -> int:
+        incoming_profile = dict(clinic.get("profile", clinic))
+        if isinstance(incoming_profile.get("evidence"), list):
+            incoming_profile["evidence"] = deduplicate_evidence(incoming_profile["evidence"])
         existing = self.conn.execute("SELECT id,profile_json FROM clinics WHERE lower(name)=lower(?) AND lower(coalesce(city,''))=lower(coalesce(?,'')) LIMIT 1", (clinic.get("name"), clinic.get("city"))).fetchone()
         if existing:
             try: merged_profile = json.loads(existing["profile_json"] or "{}")
             except json.JSONDecodeError: merged_profile = {}
-            incoming_profile = dict(clinic.get("profile", clinic))
             for key, value in incoming_profile.items():
                 if value is None or value == [] or value == {}:
                     continue
-                if key in {"contacts", "evidence", "sources", "conflicts"} and isinstance(value, list):
+                if key == "evidence" and isinstance(value, list):
+                    prior = merged_profile.get(key) or []
+                    merged_profile[key] = deduplicate_evidence([*prior, *value])
+                elif key in {"contacts", "sources", "conflicts"} and isinstance(value, list):
                     prior = merged_profile.get(key) or []
                     seen = {json.dumps(item, sort_keys=True, ensure_ascii=False) for item in prior}
                     merged_profile[key] = prior + [item for item in value if json.dumps(item, sort_keys=True, ensure_ascii=False) not in seen]
@@ -144,7 +174,7 @@ class Database:
             self.conn.commit()
             return int(existing[0])
         cur = self.conn.execute("""INSERT INTO clinics(name,website,city,country,category,phone,contact_page,description,source_url,collected_at,profile_json)
-          VALUES(?,?,?,?,?,?,?,?,?,?,?)""", (clinic.get("name"), clinic.get("website"), clinic.get("city"), clinic.get("country"), clinic.get("category"), clinic.get("phone"), clinic.get("contact_page"), clinic.get("description"), clinic.get("source_url"), utc_now(), json.dumps(clinic.get("profile", clinic), ensure_ascii=False)))
+          VALUES(?,?,?,?,?,?,?,?,?,?,?)""", (clinic.get("name"), clinic.get("website"), clinic.get("city"), clinic.get("country"), clinic.get("category"), clinic.get("phone"), clinic.get("contact_page"), clinic.get("description"), clinic.get("source_url"), utc_now(), json.dumps(incoming_profile, ensure_ascii=False)))
         self.conn.commit(); return int(cur.lastrowid)
 
     def list_discovery_runs(self) -> list[dict[str, Any]]:
@@ -221,17 +251,40 @@ class Database:
             self.conn.execute("UPDATE drafts SET status='SUPERSEDED',updated_at=? WHERE id=? AND status IN ('DRAFTED','APPROVED')", (utc_now(), int(existing[0])))
         cur = self.conn.execute("""INSERT INTO drafts(clinic_id,contact_id,subject,body,rationale,source_observations,confidence,status,created_at,updated_at,html_body,plain_text_body)
           VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""", (clinic_id, contact_id, draft["subject"], draft["body"], draft["rationale"], json.dumps(draft.get("source_observations", []), ensure_ascii=False), float(draft.get("confidence", 0)), "DRAFTED", utc_now(), utc_now(), draft.get("html_body", ""), draft.get("plain_text_body", draft["body"])))
-        self.conn.execute("UPDATE clinics SET status='LETTER_DONE' WHERE id=?", (clinic_id,)); self.conn.commit(); return int(cur.lastrowid)
+        draft_id = int(cur.lastrowid)
+        self.conn.execute("INSERT OR IGNORE INTO review_selections(draft_id,selected,updated_at) VALUES(?,1,?)", (draft_id, utc_now()))
+        self.conn.execute("UPDATE clinics SET status='LETTER_DONE' WHERE id=?", (clinic_id,)); self.conn.commit(); return draft_id
 
     def list_queue(self, status: str | None = None) -> list[dict[str, Any]]:
         where = "WHERE d.status=?" if status else "WHERE d.status IN ('DRAFTED','APPROVED')"
         args = (status,) if status else ()
-        rows = self.conn.execute(f"""SELECT d.*, c.name clinic_name,c.website,c.city,c.country,c.source_url,c.description,c.phone,c.profile_json,ct.email,ct.source_url email_source,ct.contact_type,ct.source_name,ct.confidence contact_confidence
-          FROM drafts d JOIN clinics c ON c.id=d.clinic_id JOIN contacts ct ON ct.id=d.contact_id {where} ORDER BY d.updated_at DESC""", args).fetchall()
+        rows = self.conn.execute(f"""SELECT d.*, c.name clinic_name,c.website,c.city,c.country,c.source_url,c.description,c.phone,c.profile_json,c.status clinic_status,ct.email,ct.source_url email_source,ct.contact_type,ct.source_name,ct.confidence contact_confidence,ct.is_public,rs.selected
+          FROM drafts d JOIN clinics c ON c.id=d.clinic_id JOIN contacts ct ON ct.id=d.contact_id LEFT JOIN review_selections rs ON rs.draft_id=d.id {where} ORDER BY d.updated_at DESC""", args).fetchall()
         result = []
         for row in rows:
-            item = dict(row); item["source_observations"] = json.loads(item["source_observations"]); result.append(item)
+            item = dict(row); item["source_observations"] = json.loads(item["source_observations"]); item["selected"] = bool(item.get("selected", 1)); result.append(item)
         return result
+
+    def set_review_selection(self, draft_id: int, selected: bool) -> bool:
+        draft = self.conn.execute("SELECT status FROM drafts WHERE id=?", (draft_id,)).fetchone()
+        if not draft or draft["status"] not in {"DRAFTED", "APPROVED"}: return False
+        self.conn.execute("INSERT INTO review_selections(draft_id,selected,updated_at) VALUES(?,?,?) ON CONFLICT(draft_id) DO UPDATE SET selected=excluded.selected,updated_at=excluded.updated_at", (draft_id, int(selected), utc_now()))
+        self.conn.commit()
+        return True
+
+    def set_all_review_selection(self, selected: bool) -> int:
+        now = utc_now()
+        if selected:
+            ids = [int(item["id"]) for item in self.review_send_candidates()]
+        else:
+            ids = [int(row[0]) for row in self.conn.execute("SELECT id FROM drafts WHERE status IN ('DRAFTED','APPROVED')")]
+        self.conn.executemany("INSERT INTO review_selections(draft_id,selected,updated_at) VALUES(?,?,?) ON CONFLICT(draft_id) DO UPDATE SET selected=excluded.selected,updated_at=excluded.updated_at", [(draft_id, int(selected), now) for draft_id in ids])
+        self.conn.commit()
+        return len(ids)
+
+    def review_selection_summary(self) -> dict[str, int]:
+        candidates = self.review_send_candidates()
+        return {"eligible_count": len(candidates), "selected_count": sum(1 for item in candidates if item.get("selected"))}
 
     def ready_to_send(self, vertical: str | None = None, limit: int = 10000) -> list[dict[str, Any]]:
         """Return only approved, public, unsuppressed, never-attempted business email drafts."""
@@ -263,12 +316,74 @@ class Database:
             if len(result) >= limit: break
         return result
 
-    def create_batch_job(self, batch_id: str, vertical: str, requested_count: int, clinics: list[dict[str, Any]]) -> None:
+    def review_send_candidates(self, draft_ids: list[int] | None = None, *, batch_id: str | None = None,
+                               vertical: str | None = None, require_selected: bool = False) -> list[dict[str, Any]]:
+        """Selection-ready drafts; the final snapshot is revalidated transactionally before send."""
+        rows = self.list_queue()
+        allowed_ids = set(int(item) for item in draft_ids) if draft_ids is not None else None
+        batch_clinics = None
+        if batch_id:
+            batch_clinics = {int(row[0]) for row in self.conn.execute("SELECT clinic_id FROM batch_items WHERE batch_id=?", (batch_id,))}
+        suppressed = {str(row[0]).strip().lower() for row in self.conn.execute("SELECT email FROM suppression_list")}
+        attempted = {str(row[0]).strip().lower() for row in self.conn.execute("SELECT recipient FROM send_logs WHERE status IN ('SENT','SENDING','SEND_INTERRUPTED','FAILED','UNCERTAIN')")}
+        sent_drafts = {int(row[0]) for row in self.conn.execute("SELECT draft_id FROM send_logs WHERE status='SENT' AND draft_id IS NOT NULL")}
+        result, seen_recipients, seen_clinics = [], set(), set()
+        for item in rows:
+            draft_id, clinic_id = int(item["id"]), int(item["clinic_id"])
+            if allowed_ids is not None and draft_id not in allowed_ids: continue
+            if batch_clinics is not None and clinic_id not in batch_clinics: continue
+            if vertical:
+                try: profile = json.loads(item.get("profile_json") or "{}")
+                except (TypeError, json.JSONDecodeError): profile = {}
+                if str(profile.get("vertical") or item.get("category") or "").lower() != vertical.lower(): continue
+            email = str(item.get("email") or "").strip().lower()
+            clinic_status = str(item.get("clinic_status") or "")
+            if item.get("status") not in {"DRAFTED", "APPROVED"}: continue
+            if clinic_status in {"DO_NOT_CONTACT", "SENT", "SEND_FAILED", "SEND_INTERRUPTED"}: continue
+            if require_selected and not item.get("selected"): continue
+            if draft_id in sent_drafts or email in suppressed or email in attempted: continue
+            if email in seen_recipients or clinic_id in seen_clinics: continue
+            if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email): continue
+            if item.get("contact_type") != "PUBLIC_BUSINESS_EMAIL" or int(item.get("is_public") or 0) != 1: continue
+            if not str(item.get("email_source") or "").startswith(("http://", "https://")): continue
+            seen_recipients.add(email); seen_clinics.add(clinic_id); result.append(item)
+        return result
+
+    def set_review_selection_bulk(self, draft_ids: list[int], selected: bool) -> int:
+        updated = 0
+        for draft_id in dict.fromkeys(int(item) for item in draft_ids):
+            updated += int(self.set_review_selection(draft_id, selected))
+        return updated
+
+    def create_batch_job(self, batch_id: str, vertical: str, requested_count: int, clinics: list[dict[str, Any]], *, city: str = "", country: str = "", market: str = "", outreach_language: str = "", batch_type: str = "ANALYSIS") -> None:
         now = utc_now()
-        self.conn.execute("INSERT INTO batch_jobs(batch_id,vertical,requested_count,queued_count,status,started_at,current_stage) VALUES(?,?,?,?,?,?,?)", (batch_id, vertical, requested_count, len(clinics), "RUNNING", now, "QUEUED"))
+        self.conn.execute("INSERT INTO batch_jobs(batch_id,vertical,requested_count,queued_count,status,started_at,current_stage,batch_type,city,country,market,outreach_language,discovered_count) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", (batch_id, vertical, requested_count, len(clinics), "RUNNING", now, "QUEUED", batch_type, city, country, market, outreach_language, len(clinics)))
         self.conn.executemany("INSERT INTO batch_items(batch_id,clinic_id,company_name,status) VALUES(?,?,?,'PENDING')", [(batch_id, int(row["id"]), str(row["name"])) for row in clinics])
         self.add_job_event("analysis", batch_id, "BATCH_STARTED", f"Batch started · {len(clinics)} clinic(s) queued")
         self.conn.commit()
+
+    def add_batch_discovered_items(self, batch_id: str, clinics: list[dict[str, Any]], researched_count: int) -> None:
+        self.conn.executemany("INSERT OR IGNORE INTO batch_items(batch_id,clinic_id,company_name,status,stage) VALUES(?,?,?,'PENDING','RESEARCHED')", [(batch_id, int(row["id"]), str(row["name"])) for row in clinics])
+        count = int(self.conn.execute("SELECT COUNT(*) FROM batch_items WHERE batch_id=?", (batch_id,)).fetchone()[0])
+        self.conn.execute("UPDATE batch_jobs SET queued_count=?,discovered_count=?,researched_count=?,current_stage='RESEARCHED' WHERE batch_id=?", (count, count, max(0, min(count, int(researched_count))), batch_id))
+        self.add_job_event("analysis", batch_id, "DISCOVERY_COMPLETE", f"Discovery completed · {count} unique company record(s)")
+        self.conn.commit()
+
+    def update_batch_stage(self, batch_id: str, stage: str, **fields: Any) -> None:
+        allowed = {key: value for key, value in fields.items() if key in {"current_company", "discovered_count", "researched_count", "progress", "stop_requested", "error_details"}}
+        allowed["current_stage"] = stage
+        self.conn.execute(f"UPDATE batch_jobs SET {', '.join(key+'=?' for key in allowed)} WHERE batch_id=?", [*allowed.values(), batch_id])
+        self.conn.commit()
+
+    def batch_stop_requested(self, batch_id: str) -> bool:
+        row = self.conn.execute("SELECT stop_requested FROM batch_jobs WHERE batch_id=?", (batch_id,)).fetchone()
+        return bool(row and row[0])
+
+    def request_batch_stop(self, batch_id: str) -> bool:
+        cur = self.conn.execute("UPDATE batch_jobs SET stop_requested=1 WHERE batch_id=? AND status='RUNNING'", (batch_id,))
+        if cur.rowcount: self.add_job_event("analysis", batch_id, "STOP_REQUESTED", "Batch stop requested; current company will finish first.")
+        self.conn.commit()
+        return cur.rowcount == 1
 
     def analysis_candidates(self, vertical: str, limit: int) -> list[dict[str, Any]]:
         rows = self.conn.execute("""SELECT c.id,c.name,c.category,c.status,c.profile_json,
@@ -284,15 +399,20 @@ class Database:
             clinic_vertical = str(profile.get("vertical") or item.get("category") or "").lower()
             if clinic_vertical != vertical.lower(): continue
             qualification = (profile.get("qualification") or {}).get("status")
-            no_analysis_work = not item["has_analysis"] and item["status"] in {"DISCOVERED", "RESEARCHED", "ANALYZED"}
+            no_analysis_work = not item["has_analysis"] and item["status"] in {"DISCOVERED", "RESEARCHED", "ANALYZED", "AI_ERROR"}
+            retry_analysis_error = item["status"] == "AI_ERROR" and not item["has_draft"]
             cached_qualification_work = item["has_analysis"] and qualification in {None, "QUALIFIED"} and not item["has_draft"]
-            if not (no_analysis_work or cached_qualification_work): continue
+            if not (no_analysis_work or retry_analysis_error or cached_qualification_work): continue
             result.append({"id": item["id"], "name": item["name"], "category": item["category"], "profile": profile})
             if len(result) >= limit: break
         return result
 
     def resume_batch_job(self, batch_id: str) -> bool:
-        cur = self.conn.execute("UPDATE batch_jobs SET status='RUNNING',finished_at=NULL,current_stage='RESUMING' WHERE batch_id=? AND status='INTERRUPTED' AND EXISTS(SELECT 1 FROM batch_items WHERE batch_id=? AND status='PENDING')", (batch_id, batch_id))
+        cur = self.conn.execute("""UPDATE batch_jobs SET status='RUNNING',finished_at=NULL,current_stage='RESUMING',stop_requested=0
+          WHERE batch_id=? AND status IN ('INTERRUPTED','STOPPED') AND (
+            EXISTS(SELECT 1 FROM batch_items WHERE batch_id=? AND status='PENDING') OR
+            (batch_type='NIGHT' AND discovered_count=0)
+          )""", (batch_id, batch_id))
         if cur.rowcount:
             self.add_job_event("analysis", batch_id, "BATCH_RESUMED", "Batch resumed by explicit user action")
         self.conn.commit()
@@ -304,7 +424,66 @@ class Database:
         result = dict(row)
         try: result["error_details"] = json.loads(result["error_details"] or "[]")
         except json.JSONDecodeError: result["error_details"] = []
-        result["items"] = [dict(item) for item in self.conn.execute("SELECT * FROM batch_items WHERE batch_id=? ORDER BY id", (batch_id,))]
+        items = [dict(item) for item in self.conn.execute("SELECT * FROM batch_items WHERE batch_id=? ORDER BY id", (batch_id,))]
+        ai_errors = qualification_rejected = ready_for_review = 0
+        legacy_ai_error = "Не удалось завершить анализ. Проверьте, что LM Studio запущен и модель доступна."
+        for item in items:
+            clinic = self.conn.execute("SELECT profile_json FROM clinics WHERE id=?", (item["clinic_id"],)).fetchone()
+            try: profile = json.loads(clinic[0] or "{}") if clinic else {}
+            except (TypeError, json.JSONDecodeError): profile = {}
+            qualification = profile.get("qualification") or {}
+            qualification_status = qualification.get("status")
+            contacts = list(profile.get("contacts") or [])
+            contacts.extend(dict(contact) for contact in self.conn.execute("SELECT email,source_url,is_public FROM contacts WHERE clinic_id=?", (item["clinic_id"],)))
+            has_public_email = any(isinstance(contact, dict) and contact.get("email") and contact.get("is_public", True) and (contact.get("source") or contact.get("source_url")) for contact in contacts)
+            has_analysis = bool(self.conn.execute("SELECT 1 FROM analyses WHERE clinic_id=? LIMIT 1", (item["clinic_id"],)).fetchone())
+            draft = self.conn.execute("SELECT status FROM drafts WHERE clinic_id=? AND status NOT IN ('FAILED','SKIPPED','SUPERSEDED') ORDER BY id DESC LIMIT 1", (item["clinic_id"],)).fetchone()
+            is_legacy_ai_error = item.get("status") == "FAILED" and item.get("error") == legacy_ai_error
+            if item.get("status") == "AI_ERROR" or is_legacy_ai_error:
+                ai_errors += 1
+                item["outcome_status"] = "AI_ERROR"
+                item["outcome_stage"] = "AI_ANALYSIS"
+                item["outcome_reason"] = "LM Studio не вернул корректный JSON-анализ; подробности доступны в серверном логе."
+            elif item.get("status") == "COMPLETED" and has_analysis:
+                item["analysis_status"] = "ANALYZED"
+                item["qualification_status"] = qualification_status or "NOT_ASSESSED"
+                item["qualification_reasons"] = list(qualification.get("reasons") or [])
+                analysis_row = self.conn.execute("SELECT result_json FROM analyses WHERE clinic_id=? ORDER BY created_at DESC,id DESC LIMIT 1", (item["clinic_id"],)).fetchone()
+                try: latest_analysis = json.loads(analysis_row[0] or "{}") if analysis_row else {}
+                except (TypeError, json.JSONDecodeError): latest_analysis = {}
+                raw_confidence = latest_analysis.get("confidence") if isinstance(latest_analysis, dict) else None
+                if isinstance(raw_confidence, bool) or not isinstance(raw_confidence, (int, float)):
+                    item["qualification_reasons"] = [reason for reason in item["qualification_reasons"] if "порог 0.65" not in str(reason).lower()]
+                    item["qualification_reasons"].append("AI analysis не содержит числовой confidence; нужна ручная проверка.")
+                item["draft_blockers"] = [] if has_public_email else ["Публичный business email с provenance не найден; draft нельзя создать."]
+                if qualification_status and qualification_status != "QUALIFIED":
+                    qualification_rejected += 1
+                    item["outcome_status"] = "NOT_QUALIFIED"
+                    item["outcome_stage"] = "NOT_QUALIFIED"
+                    item["outcome_reason"] = " · ".join([*item["qualification_reasons"][:4], *item["draft_blockers"]]) or "Qualification не пройдена; анализ сохранён."
+                elif draft and draft[0] in {"DRAFTED", "APPROVED"}:
+                    ready_for_review += 1
+                    item["outcome_status"] = "READY_FOR_REVIEW"
+                    item["outcome_stage"] = "READY_FOR_REVIEW"
+                    item["outcome_reason"] = "AI analysis и draft сохранены для проверки."
+                elif item.get("stage") in {"NO_PUBLIC_EMAIL", "DRAFT_GENERATION"}:
+                    item["outcome_status"] = item.get("stage")
+                    item["outcome_stage"] = item.get("stage")
+                    item["outcome_reason"] = item.get("error") or "Анализ сохранён; draft требует дополнительного шага."
+                else:
+                    item["outcome_status"] = "ANALYZED"
+                    item["outcome_stage"] = "ANALYZED"
+                    item["outcome_reason"] = "AI analysis сохранён."
+            else:
+                item["outcome_status"] = item.get("status")
+                item["outcome_stage"] = item.get("stage") or item.get("status")
+                item["outcome_reason"] = item.get("error")
+        result["items"] = items
+        result["ai_errors_count"] = ai_errors
+        result["qualification_rejected_count"] = qualification_rejected
+        result["qualification_passed_count"] = int(result.get("qualified_count") or 0)
+        result["drafts_generated_count"] = int(result.get("letters_generated") or 0)
+        result["ready_for_review_count"] = ready_for_review
         return result
 
     def latest_batch_job(self) -> dict[str, Any] | None:
@@ -323,18 +502,22 @@ class Database:
 
     def _refresh_batch_counts(self, batch_id: str) -> None:
         counts = dict(self.conn.execute("SELECT status,COUNT(*) FROM batch_items WHERE batch_id=? GROUP BY status", (batch_id,)).fetchall())
-        processed = sum(counts.get(status, 0) for status in ("COMPLETED", "FAILED", "SKIPPED"))
+        processed = sum(counts.get(status, 0) for status in ("COMPLETED", "FAILED", "AI_ERROR", "SKIPPED"))
         row = self.conn.execute("""SELECT COUNT(*) analyzed,
           SUM(CASE WHEN json_extract(c.profile_json,'$.qualification.status')='QUALIFIED' THEN 1 ELSE 0 END) qualified,
           SUM(CASE WHEN json_extract(c.profile_json,'$.qualification.status')='NEEDS_REVIEW' THEN 1 ELSE 0 END) needs_review
-          FROM batch_items i JOIN clinics c ON c.id=i.clinic_id WHERE i.batch_id=? AND i.status IN ('COMPLETED','FAILED') AND EXISTS(SELECT 1 FROM analyses a WHERE a.clinic_id=c.id)""", (batch_id,)).fetchone()
-        letters = self.conn.execute("SELECT COUNT(DISTINCT d.clinic_id) FROM batch_items i JOIN drafts d ON d.clinic_id=i.clinic_id WHERE i.batch_id=? AND i.status IN ('COMPLETED','FAILED') AND d.status IN ('DRAFTED','APPROVED','SENT')", (batch_id,)).fetchone()[0]
-        failed = counts.get("FAILED", 0)
-        self.conn.execute("UPDATE batch_jobs SET processed_count=?,analyzed_count=?,qualified_count=?,letters_generated=?,needs_review=?,failed=? WHERE batch_id=?", (processed, int(row["analyzed"] or 0), int(row["qualified"] or 0), letters, int(row["needs_review"] or 0), failed, batch_id))
+          FROM batch_items i JOIN clinics c ON c.id=i.clinic_id WHERE i.batch_id=? AND i.status IN ('COMPLETED','FAILED','AI_ERROR') AND EXISTS(SELECT 1 FROM analyses a WHERE a.clinic_id=c.id)""", (batch_id,)).fetchone()
+        letters = self.conn.execute("SELECT COUNT(DISTINCT d.clinic_id) FROM batch_items i JOIN drafts d ON d.clinic_id=i.clinic_id WHERE i.batch_id=? AND i.status IN ('COMPLETED','FAILED','AI_ERROR') AND d.status IN ('DRAFTED','APPROVED','SENT')", (batch_id,)).fetchone()[0]
+        failed = counts.get("FAILED", 0) + counts.get("AI_ERROR", 0)
+        drafts_count = int(self.conn.execute("SELECT COUNT(DISTINCT d.clinic_id) FROM batch_items i JOIN drafts d ON d.clinic_id=i.clinic_id WHERE i.batch_id=? AND d.status IN ('DRAFTED','APPROVED')", (batch_id,)).fetchone()[0])
+        ready_count = len(self.review_send_candidates(batch_id=batch_id))
+        progress = int(processed * 100 / max(1, int(self.conn.execute("SELECT queued_count FROM batch_jobs WHERE batch_id=?", (batch_id,)).fetchone()[0]))) if processed else 0
+        self.conn.execute("UPDATE batch_jobs SET processed_count=?,analyzed_count=?,qualified_count=?,letters_generated=?,needs_review=?,failed=?,drafts_count=?,ready_count=?,error_count=?,progress=? WHERE batch_id=?", (processed, int(row["analyzed"] or 0), int(row["qualified"] or 0), letters, int(row["needs_review"] or 0), failed, drafts_count, ready_count, failed, progress, batch_id))
 
     def finish_batch_job(self, batch_id: str, status: str = "COMPLETED") -> None:
         self._refresh_batch_counts(batch_id)
-        self.conn.execute("UPDATE batch_jobs SET status=?,finished_at=?,current_company=NULL,current_stage=? WHERE batch_id=?", (status, utc_now(), status, batch_id))
+        current_stage = "READY_FOR_REVIEW" if status == "COMPLETED" else status
+        self.conn.execute("UPDATE batch_jobs SET status=?,finished_at=?,current_company=NULL,current_stage=?,stop_requested=0,progress=CASE WHEN ?='COMPLETED' THEN 100 ELSE progress END WHERE batch_id=?", (status, utc_now(), current_stage, status, batch_id))
         self.add_job_event("analysis", batch_id, f"BATCH_{status}", f"Batch {status.lower()}")
         self.conn.commit()
 
@@ -371,9 +554,64 @@ class Database:
 
     def confirm_send_job(self, send_id: str, status: str = "RUNNING") -> bool:
         now = utc_now()
-        cur = self.conn.execute("UPDATE send_jobs SET status=?,confirmed_at=?,started_at=COALESCE(started_at,?),current_stage='SENDING' WHERE send_id=? AND status IN ('PREVIEW','SEND_INTERRUPTED')", (status, now, now, send_id))
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            job = self.conn.execute("SELECT status FROM send_jobs WHERE send_id=?", (send_id,)).fetchone()
+            if not job or job["status"] not in {"PREVIEW", "SEND_INTERRUPTED"}:
+                self.conn.rollback(); return False
+            promoted = 0
+            for item in self.conn.execute("SELECT draft_id FROM send_items WHERE send_id=? AND status='PENDING'", (send_id,)).fetchall():
+                draft_id = int(item["draft_id"])
+                issue, draft_status = self._send_snapshot_issue(send_id, draft_id)
+                if issue:
+                    self.conn.execute("UPDATE send_items SET status='SKIPPED',reason=?,finished_at=? WHERE send_id=? AND draft_id=?", (issue, now, send_id, draft_id))
+                    continue
+                if job["status"] == "PREVIEW" and draft_status == "DRAFTED":
+                    clinic_id = self.conn.execute("SELECT clinic_id FROM send_items WHERE send_id=? AND draft_id=?", (send_id, draft_id)).fetchone()[0]
+                    self.conn.execute("UPDATE drafts SET status='APPROVED',updated_at=? WHERE id=? AND status='DRAFTED'", (now, draft_id))
+                    self.conn.execute("UPDATE clinics SET status='READY_TO_SEND' WHERE id=?", (clinic_id,))
+                    promoted += 1
+            remaining = int(self.conn.execute("SELECT COUNT(*) FROM send_items WHERE send_id=? AND status='PENDING'", (send_id,)).fetchone()[0])
+            if remaining == 0:
+                self.conn.execute("UPDATE send_jobs SET status='CANCELLED',finished_at=?,current_stage='CANCELLED' WHERE send_id=?", (now, send_id))
+                self._refresh_send_counts(send_id)
+                self.conn.commit()
+                return False
+            self.conn.execute("UPDATE send_jobs SET status=?,confirmed_at=?,started_at=COALESCE(started_at,?),current_stage='SENDING',stop_requested=0,current_recipient=NULL,next_send_at=NULL WHERE send_id=?", (status, now, now, send_id))
+            self.conn.commit()
+            if promoted: self.add_job_event("send", send_id, "BULK_APPROVED", f"{promoted} selected draft(s) approved by explicit send confirmation")
+            return True
+        except Exception:
+            self.conn.rollback()
+            raise
+
+    def _send_snapshot_issue(self, send_id: str, draft_id: int) -> tuple[str | None, str | None]:
+        item = self.conn.execute("""SELECT i.status item_status,i.recipient,d.status draft_status,d.clinic_id,
+          c.status clinic_status,ct.email contact_email,ct.contact_type,ct.is_public,ct.source_url
+          FROM send_items i JOIN drafts d ON d.id=i.draft_id JOIN clinics c ON c.id=d.clinic_id
+          JOIN contacts ct ON ct.id=d.contact_id WHERE i.send_id=? AND i.draft_id=?""", (send_id, draft_id)).fetchone()
+        if not item: return "draft no longer exists", None
+        if item["item_status"] != "PENDING": return "item is no longer pending", str(item["draft_status"])
+        if item["draft_status"] not in {"DRAFTED", "APPROVED"}: return "draft is not selected for sending", str(item["draft_status"])
+        if item["clinic_status"] in {"DO_NOT_CONTACT", "SENT", "SEND_FAILED", "SEND_INTERRUPTED"}: return "company is not eligible for sending", str(item["draft_status"])
+        if str(item["recipient"]).strip().lower() != str(item["contact_email"]).strip().lower(): return "recipient changed after the preview was created", str(item["draft_status"])
+        if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", str(item["recipient"])): return "recipient address is invalid", str(item["draft_status"])
+        if item["contact_type"] != "PUBLIC_BUSINESS_EMAIL" or not int(item["is_public"] or 0): return "recipient is not a public business contact", str(item["draft_status"])
+        if not str(item["source_url"] or "").startswith(("http://", "https://")): return "public contact source is missing", str(item["draft_status"])
+        if self.is_suppressed(item["recipient"]): return "recipient is suppressed", str(item["draft_status"])
+        if self.conn.execute("SELECT 1 FROM send_logs WHERE lower(recipient)=lower(?) AND status IN ('SENT','SENDING','SEND_INTERRUPTED','FAILED','UNCERTAIN')", (item["recipient"],)).fetchone(): return "recipient has a prior or uncertain send attempt", str(item["draft_status"])
+        if self.conn.execute("SELECT 1 FROM send_logs WHERE draft_id=? AND status IN ('SENT','SENDING','SEND_INTERRUPTED','FAILED','UNCERTAIN')", (draft_id,)).fetchone(): return "draft has a prior or uncertain send attempt", str(item["draft_status"])
+        return None, str(item["draft_status"])
+
+    def request_send_stop(self, send_id: str) -> bool:
+        cur = self.conn.execute("UPDATE send_jobs SET stop_requested=1 WHERE send_id=? AND status='RUNNING'", (send_id,))
+        if cur.rowcount: self.add_job_event("send", send_id, "STOP_REQUESTED", "Send stop requested; the current SMTP attempt will finish first.")
         self.conn.commit()
         return cur.rowcount == 1
+
+    def send_stop_requested(self, send_id: str) -> bool:
+        row = self.conn.execute("SELECT stop_requested FROM send_jobs WHERE send_id=?", (send_id,)).fetchone()
+        return bool(row and row[0])
 
     def update_send_item(self, send_id: str, draft_id: int, **fields: Any) -> None:
         allowed = {key: value for key, value in fields.items() if key in {"status", "reason", "started_at", "finished_at"}}
@@ -388,7 +626,7 @@ class Database:
         try:
             job = self.conn.execute("SELECT mode,status FROM send_jobs WHERE send_id=?", (send_id,)).fetchone()
             item = self.conn.execute("""SELECT i.*,d.status draft_status,d.subject,d.body,d.html_body,c.status clinic_status,
-              ct.contact_type,ct.is_public,ct.source_url
+              ct.email contact_email,ct.contact_type,ct.is_public,ct.source_url
               FROM send_items i JOIN drafts d ON d.id=i.draft_id JOIN clinics c ON c.id=i.clinic_id
               JOIN contacts ct ON ct.id=d.contact_id WHERE i.send_id=? AND i.draft_id=?""", (send_id, draft_id)).fetchone()
             reason = None
@@ -396,6 +634,7 @@ class Database:
             elif not item or item["status"] != "PENDING": reason = "item is no longer pending"
             elif item["draft_status"] != "APPROVED": reason = "draft is not approved"
             elif item["clinic_status"] in {"DO_NOT_CONTACT", "SENT", "SEND_FAILED", "SEND_INTERRUPTED"}: reason = "clinic is not eligible for sending"
+            elif str(item["recipient"]).strip().lower() != str(item["contact_email"]).strip().lower(): reason = "recipient changed after the preview was created"
             elif item["contact_type"] != "PUBLIC_BUSINESS_EMAIL" or not int(item["is_public"] or 0): reason = "recipient is not a public business contact"
             elif not str(item["source_url"] or "").startswith(("http://", "https://")): reason = "public contact source is missing"
             elif self.is_suppressed(item["recipient"]): reason = "recipient is suppressed"
@@ -411,7 +650,7 @@ class Database:
             self.conn.execute("UPDATE drafts SET status='SENDING',updated_at=? WHERE id=? AND status='APPROVED'", (now, draft_id))
             self.conn.execute("UPDATE clinics SET status='SENDING' WHERE id=?", (item["clinic_id"],))
             self.conn.execute("UPDATE send_items SET status='SENDING',started_at=?,send_log_id=? WHERE send_id=? AND draft_id=?", (now, log_id, send_id, draft_id))
-            self.conn.execute("UPDATE send_jobs SET current_company=?,current_stage='SENDING' WHERE send_id=?", (item["company_name"], send_id))
+            self.conn.execute("UPDATE send_jobs SET current_company=?,current_recipient=?,current_stage='SENDING',next_send_at=NULL WHERE send_id=?", (item["company_name"], item["recipient"], send_id))
             self.conn.commit()
             return {**dict(item), "send_log_id": log_id, "provider": provider}, None
         except Exception:
@@ -440,7 +679,7 @@ class Database:
         errors = list(job.get("error_details", [])) if job else []
         if error: errors.append(error)
         self._refresh_send_counts(send_id)
-        self.conn.execute("UPDATE send_jobs SET status=?,finished_at=?,current_company=NULL,current_stage=?,error_details=? WHERE send_id=?", (status, utc_now(), status, json.dumps(errors, ensure_ascii=False), send_id))
+        self.conn.execute("UPDATE send_jobs SET status=?,finished_at=?,current_company=NULL,current_recipient=NULL,next_send_at=NULL,stop_requested=0,current_stage=?,error_details=? WHERE send_id=?", (status, utc_now(), status, json.dumps(errors, ensure_ascii=False), send_id))
         self.add_job_event("send", send_id, f"SEND_{status}", error or f"Send batch {status.lower()}")
         self.conn.commit()
 
@@ -473,7 +712,7 @@ class Database:
                 self.conn.execute("UPDATE drafts SET status='SEND_INTERRUPTED',updated_at=? WHERE id=? AND status='SENDING'", (now, draft_id))
                 self.conn.execute("UPDATE clinics SET status='SEND_INTERRUPTED' WHERE id=?", (clinic_id,))
                 self.add_job_event("send", send_id, "SEND_INTERRUPTED", "Current provider attempt is uncertain and will not be retried automatically.", int(clinic_id), int(draft_id), str(company_name))
-            self.conn.execute("UPDATE send_jobs SET status='SEND_INTERRUPTED',finished_at=?,current_company=NULL,current_stage='INTERRUPTED' WHERE send_id=?", (now, send_id))
+            self.conn.execute("UPDATE send_jobs SET status='SEND_INTERRUPTED',finished_at=?,current_company=NULL,current_recipient=NULL,next_send_at=NULL,stop_requested=0,current_stage='INTERRUPTED' WHERE send_id=?", (now, send_id))
             self.add_job_event("send", send_id, "SEND_INTERRUPTED", "Send batch interrupted by server restart; explicit resume is required.")
         self.conn.commit()
 
@@ -482,6 +721,7 @@ class Database:
           GROUP_CONCAT(DISTINCT ct.email) emails, COUNT(DISTINCT a.id) analysis_count
           FROM clinics c LEFT JOIN contacts ct ON ct.clinic_id=c.id LEFT JOIN analyses a ON a.clinic_id=c.id
           GROUP BY c.id ORDER BY c.collected_at DESC""").fetchall()
+        ready_ids = {int(draft["id"]) for draft in self.ready_to_send()}
         result = []
         for row in rows:
             item = dict(row)
@@ -490,10 +730,10 @@ class Database:
                 qualification = profile.get("qualification") or {}
                 item.update({"website_status": profile.get("website_status", "WEBSITE_UNCERTAIN"), "website_quality_observations": profile.get("website_quality_observations", []), "services": profile.get("services", []), "source_urls": profile.get("source_urls", []), "qualification_status": qualification.get("status", "NOT_ASSESSED"), "qualification": qualification, "vertical": item.get("category") or "unknown"})
             except json.JSONDecodeError: pass
-            draft_state = self.conn.execute("SELECT status FROM drafts WHERE clinic_id=? ORDER BY id DESC LIMIT 1", (item["id"],)).fetchone()
-            if draft_state and draft_state[0] == "SENT": item["workflow_status"] = "SENT"
-            elif draft_state and draft_state[0] == "APPROVED": item["workflow_status"] = "READY_TO_SEND" if any(row["clinic_id"] == item["id"] for row in self.ready_to_send()) else "APPROVED"
-            elif draft_state and draft_state[0] in {"DRAFTED", "SIMULATED_SENT", "SENDING", "SEND_INTERRUPTED", "SEND_FAILED"}: item["workflow_status"] = {"DRAFTED": "LETTER_DONE"}.get(draft_state[0], draft_state[0])
+            draft_state = self.conn.execute("SELECT id,status FROM drafts WHERE clinic_id=? ORDER BY id DESC LIMIT 1", (item["id"],)).fetchone()
+            if draft_state and draft_state["status"] == "SENT": item["workflow_status"] = "SENT"
+            elif draft_state and draft_state["status"] == "APPROVED": item["workflow_status"] = "READY_TO_SEND" if int(draft_state["id"]) in ready_ids else "APPROVED"
+            elif draft_state and draft_state["status"] in {"DRAFTED", "SIMULATED_SENT", "SENDING", "SEND_INTERRUPTED", "SEND_FAILED"}: item["workflow_status"] = {"DRAFTED": "LETTER_DONE"}.get(draft_state["status"], draft_state["status"])
             else: item["workflow_status"] = item.get("status", "DISCOVERED")
             result.append(item)
         return result

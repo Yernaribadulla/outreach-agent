@@ -1,5 +1,6 @@
 import tempfile
 import json
+import io
 from pathlib import Path
 import unittest
 from unittest.mock import patch
@@ -11,6 +12,7 @@ from app.website_audit import audit_website
 from app.verticals import get_vertical
 from app.discovery.providers import SourceUnavailable, _get
 from app.analysis.lm_studio import LMStudioClient, LMStudioError
+from app.analysis.context import LLM_CONTEXT_MAX_CHARS, LLM_CONTEXT_MAX_EVIDENCE, build_llm_context, deduplicate_evidence
 from app.discovery.gemini_import import import_gemini_file
 from app.autonomous import validate_analysis, EvidenceValidationError
 from app.qualification import qualify_lead
@@ -18,6 +20,69 @@ from app.verticals import build_search_query
 
 
 class LeadEngineTests(unittest.TestCase):
+    def test_evidence_dedup_uses_claim_url_and_normalized_text_without_losing_other_sources(self):
+        evidence = [
+            {"evidence_id": "old-1", "type": "booking", "fact": "Online booking detected", "snippet": "Book now", "source": "https://clinic.example/booking#top", "status": "CONFIRMED", "observed_at": "yesterday"},
+            {"evidence_id": "new-1", "type": "booking", "fact": "Online booking detected", "snippet": "  Book   now ", "source": "https://clinic.example/booking/", "status": "CONFIRMED", "observed_at": "today"},
+            {"evidence_id": "dir-1", "type": "booking", "fact": "Online booking detected", "snippet": "Book now", "source": "https://directory.example/clinic", "status": "CONFIRMED"},
+        ]
+        result = deduplicate_evidence(evidence)
+        self.assertEqual(len(result), 2)
+        self.assertEqual({item["source"] for item in result}, {"https://clinic.example/booking#top", "https://directory.example/clinic"})
+
+    def test_llm_context_is_bounded_deduplicated_and_excludes_raw_audit(self):
+        repeated = {
+            "evidence_id": "ev-repeat", "type": "booking", "fact": "Booking action detected", "snippet": "Book now",
+            "source": "https://clinic.example/booking", "status": "CONFIRMED", "confidence": "HIGH",
+        }
+        payload = {
+            "company": {"name": "Synthetic clinic", "city": "Antalya", "website": "https://clinic.example"},
+            "website_audit": {"website_status": "WEBSITE_OK", "http_status": 200, "signals": {"booking": True}, "evidence": [repeated], "raw_html": "OVERSIZED_RAW_HTML_MARKER " + "x" * 20000},
+            "evidence": [repeated, {**repeated, "evidence_id": "ev-copy", "observed_at": "later"}, *[
+                {"evidence_id": f"ev-{i}", "type": "signal", "fact": f"Signal {i}", "snippet": f"signal {i} " + "details " * 80, "source": f"https://clinic.example/{i}", "status": "CONFIRMED"}
+                for i in range(10)
+            ]],
+            "contacts": [{"email": f"desk{i}@clinic.example", "source_url": f"https://clinic.example/contact/{i}"} for i in range(8)],
+        }
+        context = build_llm_context(payload, ("online_booking",))
+        serialized = json.dumps(context, ensure_ascii=False, separators=(",", ":"))
+        self.assertLessEqual(len(serialized), LLM_CONTEXT_MAX_CHARS)
+        self.assertLessEqual(len(context["key_evidence"]), LLM_CONTEXT_MAX_EVIDENCE)
+        self.assertLessEqual(len(context["contacts"]), 3)
+        self.assertNotIn("OVERSIZED_RAW_HTML_MARKER", serialized)
+        self.assertNotIn("website_audit", serialized)
+        self.assertEqual(sum(item["claim"] == "booking" for item in context["key_evidence"]), 1)
+        self.assertEqual(build_llm_context(context)["key_evidence"], context["key_evidence"])
+
+    def test_opportunity_request_uses_compact_context_and_logs_input_diagnostics(self):
+        client = LMStudioClient("http://127.0.0.1:1234/v1", "qwen/qwen3-vl-8b")
+        captured = {}
+        opportunity = {
+            "company_summary": "ok", "priority": {"score": 1, "website_opportunity": False, "booking_opportunity": False, "crm_opportunity": False, "ai_opportunity": False, "automation_opportunity": False},
+            "why_this_lead": ["Review public evidence."], "recommended_angle": "review", "sales_brief": "review",
+            "confidence": 0.72, "opportunities": [],
+        }
+        response = {"choices": [{"message": {"content": json.dumps(opportunity, ensure_ascii=False)}}]}
+        def fake_request(body):
+            captured.update(body)
+            return response
+        client._request = fake_request
+        output = io.StringIO()
+        payload = {"company": {"name": "Fixture", "website": "https://fixture.example"}, "website_audit": {"raw_html": "RAW_AUDIT_MARKER" + "x" * 10000, "signals": {}}, "evidence": [{"evidence_id": "ev-1", "type": "booking", "fact": "Booking action", "snippet": "Book now", "source": "https://fixture.example/booking", "status": "CONFIRMED"}]}
+        with patch("sys.stdout", output):
+            result = client.chat_opportunity(payload)
+        request_text = "\n".join(message["content"] for message in captured["messages"])
+        self.assertIn("confidence", result)
+        self.assertIn("confidence — число от 0 до 1", request_text)
+        self.assertEqual(captured["response_format"]["type"], "json_schema")
+        self.assertNotIn("RAW_AUDIT_MARKER", request_text)
+        self.assertLessEqual(len(request_text.split("COMPACT RESEARCH OBJECT:\n", 1)[-1]), LLM_CONTEXT_MAX_CHARS)
+        sent_context = json.loads(request_text.split("COMPACT RESEARCH OBJECT:\n", 1)[-1])
+        self.assertEqual(sent_context["key_evidence"][0]["text"], "Book now")
+        self.assertIn("estimated_tokens=", output.getvalue())
+        self.assertIn("elapsed=", output.getvalue())
+        self.assertIn("qwen/qwen3-vl-8b", output.getvalue())
+
     def test_vertical_configuration_is_not_dental_hardcoded(self):
         self.assertEqual(get_vertical("dental").key, "dental")
         self.assertIn("before_after", get_vertical("detailing").opportunity_signals)
@@ -46,6 +111,12 @@ class LeadEngineTests(unittest.TestCase):
         self.assertFalse(result["factors"]["opportunity_fit"])
         self.assertTrue(any("evidence" in reason.lower() for reason in result["reasons"]))
         self.assertTrue(any("контакт" in reason.lower() for reason in result["reasons"]))
+
+    def test_successful_analysis_missing_confidence_is_needs_review_not_ai_error(self):
+        result = qualify_lead({"category": "dental", "contacts": [], "evidence": []}, {"digital_state": {}}, "dental")
+        self.assertEqual(result["status"], "NEEDS_REVIEW")
+        self.assertFalse(result["factors"]["confidence_available"])
+        self.assertTrue(any("confidence" in reason.lower() for reason in result["reasons"]))
 
     def test_resolution_requires_objective_signal(self):
         a = {"name": "ABC Dental", "city": "Astana", "phone": "+7 700 000"}
@@ -181,6 +252,16 @@ class LeadEngineTests(unittest.TestCase):
         payload = {"company": {"name": "Detail Co", "website": "https://detail.example"}, "evidence": [{"evidence_id": "ev-001", "status": "CONFIRMED", "fact": "booking detected", "source": "https://detail.example", "company_name": "Detail Co"}]}
         analysis = {"digital_state": {"online_booking": {"status": "CONFIRMED", "evidence_ids": ["ev-missing"]}}}
         with self.assertRaises(EvidenceValidationError): validate_analysis(payload, analysis)
+
+    def test_analysis_cannot_reference_evidence_omitted_from_llm_context(self):
+        evidence = [
+            {"evidence_id": "ev-sent", "status": "CONFIRMED", "fact": "Booking action detected", "source": "https://detail.example/booking", "company_name": "Detail Co"},
+            {"evidence_id": "ev-not-sent", "status": "CONFIRMED", "fact": "CRM detected", "source": "https://detail.example/crm", "company_name": "Detail Co"},
+        ]
+        payload = {"company": {"name": "Detail Co", "website": "https://detail.example"}, "evidence": evidence}
+        analysis = {"digital_state": {"crm": {"status": "CONFIRMED", "reason": "CRM found.", "evidence_ids": ["ev-not-sent"]}}}
+        with self.assertRaises(EvidenceValidationError):
+            validate_analysis(payload, analysis, {"ev-sent"})
 
     def test_confirmed_claim_without_evidence_is_downgraded(self):
         payload = {"company": {"name": "Detail Co", "website": "https://detail.example"}, "evidence": []}

@@ -6,6 +6,7 @@ from collections.abc import Callable
 
 from .providers import DiscoveryProvider
 from .resolution import contact_conflicts, resolve_entities
+from ..analysis.context import deduplicate_evidence
 from ..website_audit import audit_website
 from ..extraction.public_page import extract_business_contacts
 from urllib.parse import urlparse
@@ -92,6 +93,9 @@ def discover(providers: list[DiscoveryProvider], vertical: str, query: str, targ
             item.setdefault("evidence_id", f"ev-{index:03d}")
             item.setdefault("company_name", entity.get("name"))
             item.setdefault("snippet", item.get("fact", ""))
+        entity["evidence"] = deduplicate_evidence(entity["evidence"])
+        for index, item in enumerate(entity["evidence"], 1):
+            item["evidence_id"] = f"ev-{index:03d}"
         for contact in entity["contacts"]:
             if contact.get("email"):
                 contact.setdefault("type", "PUBLIC_BUSINESS_EMAIL")
