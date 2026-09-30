@@ -8,6 +8,7 @@ from typing import Any
 
 from .resolution import match_confidence
 from ..storage.db import Database, utc_now
+from ..verticals import get_vertical
 
 FIELDS = ("name", "address", "phone", "website", "source_url", "source_type", "summary", "evidence", "confidence")
 
@@ -29,6 +30,7 @@ def _normalize(item: dict[str, Any]) -> dict[str, Any]:
 
 
 def import_gemini_file(path: str | Path, vertical: str, db_path: str | Path) -> dict[str, Any]:
+    vertical_config = get_vertical(vertical)
     input_path = Path(path)
     payload = json.loads(input_path.read_text(encoding="utf-8"))
     incoming = [_normalize(item) for item in _records(payload)]
@@ -52,7 +54,7 @@ def import_gemini_file(path: str | Path, vertical: str, db_path: str | Path) -> 
             duplicate_count += 1
         else:
             profile = {"claim_status": "UNVERIFIED", "summary": candidate["summary"], "evidence": candidate["evidence"], "confidence": candidate["confidence"], "sources": candidate["sources"], "discovery_records": [candidate], "duplicate_discoveries": 0}
-            clinic = {"name": candidate["name"], "address": candidate["address"], "website": candidate["website"], "phone": candidate["phone"], "source_url": candidate["source_url"], "description": candidate["summary"], "profile": profile, "city": None, "category": "dental"}
+            clinic = {"name": candidate["name"], "address": candidate["address"], "website": candidate["website"], "phone": candidate["phone"], "source_url": candidate["source_url"], "description": candidate["summary"], "profile": {**profile, "vertical": vertical_config.key}, "city": None, "category": vertical_config.category}
             clinic_id = db.add_clinic(clinic)
             candidate["id"] = clinic_id; existing.append({**clinic, "id": clinic_id, "profile_json": json.dumps(profile, ensure_ascii=False)})
             new_count += 1

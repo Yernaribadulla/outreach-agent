@@ -10,7 +10,7 @@ GENERIC_PREFIXES = ("info", "contact", "hello", "clinic", "admin", "booking", "o
 
 
 def fetch(url: str, timeout: int = 12) -> tuple[str, str]:
-    req = Request(url, headers={"User-Agent": "DENTARA-Outreach-Research/1.0"})
+    req = Request(url, headers={"User-Agent": "B2B-Outreach-Research/1.0"})
     with urlopen(req, timeout=timeout) as response:
         content_type = response.headers.get("content-type", "")
         if "text/html" not in content_type: return "", response.geturl()

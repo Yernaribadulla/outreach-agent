@@ -12,12 +12,40 @@ from app.verticals import get_vertical
 from app.discovery.providers import SourceUnavailable, _get
 from app.analysis.lm_studio import LMStudioClient, LMStudioError
 from app.discovery.gemini_import import import_gemini_file
+from app.autonomous import validate_analysis, EvidenceValidationError
+from app.qualification import qualify_lead
+from app.verticals import build_search_query
 
 
 class LeadEngineTests(unittest.TestCase):
     def test_vertical_configuration_is_not_dental_hardcoded(self):
         self.assertEqual(get_vertical("dental").key, "dental")
         self.assertIn("before_after", get_vertical("detailing").opportunity_signals)
+        query = build_search_query("detailing", "Екатеринбург")
+        self.assertIn("детейлинг", query)
+        self.assertNotIn("стомат", query.lower())
+        self.assertNotIn("dental", query.lower())
+
+    def test_autonomous_query_uses_selected_vertical(self):
+        from app import autonomous
+        from app.discovery.engine import DiscoveryRun
+        captured = {}
+        def fake_discover(providers, vertical, query, target):
+            captured["query"] = query
+            return DiscoveryRun(vertical, query)
+        with tempfile.TemporaryDirectory() as folder, patch("app.autonomous.discover", side_effect=fake_discover), patch("app.autonomous.LMStudioClient.health", side_effect=RuntimeError("offline")):
+            autonomous.run_autonomous("detailing", "Алматы", 3, str(Path(folder) / "test.db"))
+        self.assertIn("детейлинг", captured["query"])
+        self.assertNotIn("стомат", captured["query"].lower())
+
+    def test_ai_success_does_not_qualify_without_requirements(self):
+        result = qualify_lead({"category": "dental", "contacts": [], "evidence": []}, {"confidence": 0.99, "digital_state": {}}, "dental")
+        self.assertEqual(result["status"], "NEEDS_REVIEW")
+        self.assertFalse(result["factors"]["evidence_quality"])
+        self.assertFalse(result["factors"]["contactability"])
+        self.assertFalse(result["factors"]["opportunity_fit"])
+        self.assertTrue(any("evidence" in reason.lower() for reason in result["reasons"]))
+        self.assertTrue(any("контакт" in reason.lower() for reason in result["reasons"]))
 
     def test_resolution_requires_objective_signal(self):
         a = {"name": "ABC Dental", "city": "Astana", "phone": "+7 700 000"}
@@ -32,6 +60,22 @@ class LeadEngineTests(unittest.TestCase):
         conflict = contact_conflicts(records)
         self.assertEqual(conflict[0]["type"], "CONTACT_CONFLICT")
         self.assertEqual(set(conflict[0]["values"]), {"+7 1", "+7 2"})
+        same_company = [{"name": "A", "city": "Astana", "address": "A 1", "website": "https://a.example", "phone": "+7 1", "source_url": "https://2gis.example/a"}, {"name": "A", "city": "Astana", "address": "A 1", "website": "https://a.example", "phone": "+7 2", "source_url": "https://yandex.example/a"}]
+        entity = resolve_entities(same_company)
+        self.assertEqual(len(entity), 1)
+        self.assertEqual(set(contact_conflicts(entity[0]["records"])[0]["values"]), {"+7 1", "+7 2"})
+
+    def test_resolution_matches_same_business_and_keeps_distinct_locations_apart(self):
+        same_business = [
+            {"name": "Dental ABC", "city": "Almaty", "phone": "+7 777 123", "website": "https://abc.kz"},
+            {"name": "ABC Dental", "city": "Almaty", "phone": "+7 777 123", "website": "https://abc.kz"},
+        ]
+        self.assertEqual(len(resolve_entities(same_business)), 1)
+        distinct_locations = [
+            {"name": "Dental ABC", "city": "Almaty", "address": "Address A", "phone": "+7 111"},
+            {"name": "Dental ABC", "city": "Almaty", "address": "Address B", "phone": "+7 222"},
+        ]
+        self.assertEqual(len(resolve_entities(distinct_locations)), 2)
 
     def test_website_audit_unknown_and_deterministic_statuses(self):
         self.assertEqual(audit_website(None)["website_status"], "NO_WEBSITE_FOUND")
@@ -40,7 +84,52 @@ class LeadEngineTests(unittest.TestCase):
             result = audit_website("https://clinic.test")
         self.assertEqual(result["website_status"], "WEBSITE_OK")
         self.assertTrue(result["signals"]["booking"])
-        self.assertTrue(all(item["status"] == "CONFIRMED" for item in result["evidence"]))
+        self.assertTrue(any(item["status"] == "CONFIRMED" for item in result["evidence"]))
+        self.assertTrue(any(item["status"] == "NOT_DETECTED" for item in result["evidence"]))
+
+    def test_website_audit_does_not_turn_informational_mentions_into_features(self):
+        html = """<html><head><title>Example clinic</title><meta name="description" content="About us"></head><body>
+          <p>Online booking is not available.</p><p>WhatsApp us</p>
+          <p>CRM systems are important for clinics.</p><article>Our article discusses payment options.</article>
+        </body></html>"""
+        with patch("app.website_audit._fetch", return_value=(html, "https://clinic.test/", 200, .04)):
+            result = audit_website("https://clinic.test")
+        self.assertFalse(result["signals"]["booking"])
+        self.assertFalse(result["signals"]["whatsapp"])
+        self.assertFalse(result["signals"]["crm"])
+        self.assertFalse(result["signals"]["online_payment"])
+        for key in ("booking", "whatsapp", "crm", "online_payment"):
+            item = next(item for item in result["evidence"] if item["fact"].startswith(f"{key} "))
+            self.assertEqual(item["status"], "NOT_DETECTED")
+            self.assertTrue(item["source"])
+            self.assertTrue(item["observed_at"])
+
+    def test_website_audit_requires_real_action_links_for_booking_whatsapp_and_payment(self):
+        html = """<html><head><title>Example</title><meta name="description" content="Example"></head><body>
+          <a href="/booking">Запись</a><a href="https://wa.me/77771234567">WhatsApp</a>
+          <a href="https://paybox.money/merchant/123">Оплатить</a>
+        </body></html>"""
+        with patch("app.website_audit._fetch", return_value=(html, "https://clinic.test/", 200, .04)):
+            result = audit_website("https://clinic.test")
+        self.assertTrue(result["signals"]["booking"])
+        self.assertTrue(result["signals"]["whatsapp"])
+        self.assertTrue(result["signals"]["online_payment"])
+
+    def test_unavailable_website_is_unknown_not_confirmed_failure_evidence(self):
+        with patch("app.website_audit._fetch", side_effect=TimeoutError("offline")):
+            result = audit_website("https://clinic.test")
+        self.assertEqual(result["website_status"], "WEBSITE_UNAVAILABLE")
+        self.assertEqual(result["status"], "UNKNOWN")
+        self.assertEqual(result["evidence"][0]["status"], "UNKNOWN")
+        self.assertTrue(result["evidence"][0]["observed_at"])
+
+    def test_invalid_enum_and_missing_fields_never_create_confirmed_claim(self):
+        payload = {"company": {"name": "Detail Co", "website": "https://detail.example"}, "evidence": []}
+        result = validate_analysis(payload, {"digital_state": {"crm": {"status": "PRESENT", "evidence_ids": []}, "online_booking": "malformed"}})
+        self.assertEqual(result["digital_state"]["crm"]["status"], "UNKNOWN")
+        self.assertEqual(result["digital_state"]["online_booking"]["status"], "UNKNOWN")
+        missing = validate_analysis({"company": {"name": "Detail Co"}, "evidence": []}, {})
+        self.assertFalse(any(claim.get("status") == "CONFIRMED" for claim in missing.get("digital_state", {}).values()))
 
     def test_missing_source_is_explicit(self):
         class Broken:
@@ -74,6 +163,42 @@ class LeadEngineTests(unittest.TestCase):
         client = LMStudioClient("http://127.0.0.1:1234/v1", "test")
         with patch.object(client, "_request", return_value={"choices": [{"message": {"content": "not json"}}]}):
             with self.assertRaises(LMStudioError): client.chat_opportunity({"company": {}})
+        with patch.object(client, "_request", return_value={"choices": [{"message": {"content": "{broken}"}}]}):
+            with self.assertRaises(LMStudioError): client.chat_opportunity({"company": {}})
+
+    def test_dashboard_lm_contract_never_falls_back_to_another_model(self):
+        from app import server
+        with patch("app.server.load_env", return_value={"LM_STUDIO_MODEL": "qwen/qwen2.5-coder-14b"}):
+            with self.assertRaisesRegex(RuntimeError, "Требуется только модель"):
+                server.lm_client({"LM_STUDIO_MODEL": "qwen/qwen2.5-coder-14b"})
+        with patch("app.server.LMStudioClient") as client_type:
+            client_type.return_value.health.return_value = {"data": [{"id": "qwen/qwen2.5-coder-14b"}]}
+            with self.assertRaisesRegex(RuntimeError, "автоматическая замена запрещена"):
+                server.lm_client({})
+            self.assertEqual(client_type.call_args.args[1], "qwen/qwen3-vl-8b")
+
+    def test_invalid_evidence_id_is_rejected(self):
+        payload = {"company": {"name": "Detail Co", "website": "https://detail.example"}, "evidence": [{"evidence_id": "ev-001", "status": "CONFIRMED", "fact": "booking detected", "source": "https://detail.example", "company_name": "Detail Co"}]}
+        analysis = {"digital_state": {"online_booking": {"status": "CONFIRMED", "evidence_ids": ["ev-missing"]}}}
+        with self.assertRaises(EvidenceValidationError): validate_analysis(payload, analysis)
+
+    def test_confirmed_claim_without_evidence_is_downgraded(self):
+        payload = {"company": {"name": "Detail Co", "website": "https://detail.example"}, "evidence": []}
+        analysis = {"digital_state": {"crm": {"status": "CONFIRMED", "reason": "CRM", "evidence_ids": []}}}
+        result = validate_analysis(payload, analysis)
+        self.assertEqual(result["digital_state"]["crm"]["status"], "UNKNOWN")
+
+    def test_evidence_owned_by_another_company_is_rejected(self):
+        payload = {"company": {"name": "Detail Co", "website": "https://detail.example"}, "evidence": [{"evidence_id": "ev-001", "status": "CONFIRMED", "fact": "CRM detected", "source": "https://detail.example", "company_name": "Other Co"}]}
+        analysis = {"digital_state": {"crm": {"status": "CONFIRMED", "evidence_ids": ["ev-001"]}}}
+        with self.assertRaises(EvidenceValidationError): validate_analysis(payload, analysis)
+
+    def test_unknown_evidence_source_cannot_confirm_claim(self):
+        payload = {"company": {"name": "Detail Co", "website": "https://detail.example"}, "evidence": [{"evidence_id": "ev-001", "status": "CONFIRMED", "fact": "CRM detected", "source": "file://private", "company_name": "Detail Co"}]}
+        analysis = {"digital_state": {"crm": {"status": "CONFIRMED", "evidence_ids": ["ev-001"]}}}
+        result = validate_analysis(payload, analysis)
+        self.assertEqual(result["digital_state"]["crm"]["status"], "UNKNOWN")
+        self.assertEqual(result["digital_state"]["crm"]["evidence_ids"], [])
 
     def test_gemini_import_new_duplicate_null_and_provenance(self):
         with tempfile.TemporaryDirectory() as tmp:

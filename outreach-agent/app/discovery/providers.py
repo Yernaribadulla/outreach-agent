@@ -5,6 +5,7 @@ from typing import Any, Protocol
 from html import unescape
 from urllib.parse import quote, urljoin, urlparse, parse_qs
 from urllib.request import Request, urlopen
+from ..verticals import VerticalConfig, get_vertical
 import re
 import time
 
@@ -39,10 +40,13 @@ class SourceUnavailable(RuntimeError):
 class OpenStreetMapProvider:
     name = "openstreetmap"
 
-    def __init__(self, timeout: int = 20): self.timeout = timeout
+    def __init__(self, vertical: str | VerticalConfig = "dental", city: str | None = None, timeout: int = 20):
+        self.vertical = get_vertical(vertical) if isinstance(vertical, str) else vertical
+        self.city = city
+        self.timeout = timeout
 
     def search(self, query: str, target_count: int = 100) -> list[dict[str, Any]]:
-        city = query.rsplit(" ", 1)[-1] if query else "Астана"
+        city = self.city or (query.rsplit(" ", 1)[-1] if query else "Астана")
         geocode = quote(city)
         nominatim = f"https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&q={geocode}"
         try:
@@ -52,7 +56,13 @@ class OpenStreetMapProvider:
             place = places[0]; lat, lon = float(place["lat"]), float(place["lon"])
             delta = 0.22
             bbox = f"{lat-delta},{lon-delta},{lat+delta},{lon+delta}"
-            overpass = "[out:json][timeout:15];(nwr[amenity=dentist]({bbox});nwr[healthcare=dentist]({bbox}););out center tags;".format(bbox=bbox)
+            if self.vertical.key == "dental":
+                filters = "nwr[amenity=dentist]({bbox});nwr[healthcare=dentist]({bbox});"
+            elif self.vertical.key == "detailing":
+                filters = "nwr[shop=car_repair]({bbox});nwr[shop=car]({bbox});nwr[amenity=car_wash]({bbox});"
+            else:
+                raise SourceUnavailable(f"OpenStreetMap categories are not configured for {self.vertical.key}")
+            overpass = f"[out:json][timeout:15];({filters.format(bbox=bbox)});out center tags;"
             request = Request("https://overpass-api.de/api/interpreter", data=overpass.encode(), headers={"User-Agent": "B2B-Lead-Research/1.0", "Content-Type": "application/x-www-form-urlencoded"}, method="POST")
             started = time.perf_counter(); print(f"[DISCOVERY] HTTP start provider_domain=overpass-api.de timeout={self.timeout}s", flush=True)
             with urlopen(request, timeout=self.timeout) as response:
@@ -71,8 +81,8 @@ class OpenStreetMapProvider:
             address = ", ".join(x for x in (tags.get("addr:postcode"), tags.get("addr:street"), tags.get("addr:housenumber")) if x) or None
             website = tags.get("website") or tags.get("contact:website")
             source_url = f"https://www.openstreetmap.org/{element_id}"
-            results.append({"name": name, "address": address, "city": city, "phone": tags.get("phone") or tags.get("contact:phone"), "website": website, "latitude": lat, "longitude": lon, "osm_id": element_id, "source_url": source_url, "source": "openstreetmap", "source_mode": "live", "category": "dental", "discovery_timestamp": utc_now() if 'utc_now' in globals() else time.strftime('%Y-%m-%dT%H:%M:%SZ'), "sources": [{"source": "openstreetmap", "source_url": source_url, "source_mode": "live"}]})
-        if not results: raise SourceUnavailable("OpenStreetMap returned no named dental organizations")
+            results.append({"name": name, "address": address, "city": city, "phone": tags.get("phone") or tags.get("contact:phone"), "website": website, "latitude": lat, "longitude": lon, "osm_id": element_id, "source_url": source_url, "source": "openstreetmap", "source_mode": "live", "category": self.vertical.category, "discovery_timestamp": time.strftime('%Y-%m-%dT%H:%M:%SZ'), "sources": [{"source": "openstreetmap", "source_url": source_url, "source_mode": "live"}]})
+        if not results: raise SourceUnavailable(f"OpenStreetMap returned no named {self.vertical.label} organizations")
         return results[:target_count]
 
     def get_business_details(self, result: dict[str, Any]) -> dict[str, Any]: return result
@@ -256,7 +266,7 @@ class PlaywrightTwoGISProvider:
                     phone = next(iter(re.findall(r"(?:\+7|8)[\d\s()\-]{7,}", text)), None)
                     results.append({"name": name[:180], "address": None, "phone": phone, "website": None,
                                     "source": "2GIS", "source_mode": "live_browser", "source_url": href,
-                                    "category": "стоматология", "sources": [{"source": "2GIS", "source_url": href, "source_mode": "live_browser"}]})
+                                    "sources": [{"source": "2GIS", "source_url": href, "source_mode": "live_browser"}]})
                     if len(results) >= target_count: break
                 browser.close()
             if not results: raise SourceUnavailable("2GIS page loaded but no business cards were found")

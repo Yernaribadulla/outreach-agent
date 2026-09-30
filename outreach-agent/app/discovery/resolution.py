@@ -15,8 +15,6 @@ def _domain(url: str | None) -> str:
 
 def match_confidence(left: dict, right: dict) -> float:
     if left.get("city") and right.get("city") and _norm(left["city"]) != _norm(right["city"]): return 0.0
-    if left.get("phone") and right.get("phone") and _norm(left["phone"]) != _norm(right["phone"]): return 0.0
-    if left.get("website") and right.get("website") and _domain(left["website"]) != _domain(right["website"]): return 0.0
     evidence = []
     if left.get("phone") and right.get("phone") and _norm(left["phone"]) == _norm(right["phone"]): evidence.append(0.45)
     if left.get("address") and right.get("address") and _norm(left["address"]) == _norm(right["address"]): evidence.append(0.30)
@@ -37,7 +35,7 @@ def resolve_entities(records: list[dict]) -> list[dict]:
             if score > confidence: best, confidence = entity, score
         if best is None or confidence < 0.70:
             entity = dict(record); entity["aliases"] = [record.get("name")] if record.get("name") else []
-            entity["sources"] = list(record.get("sources", [])); entity["same_business_confidence"] = 1.0
+            entity["sources"] = list(record.get("sources", [])); entity["records"] = [record]; entity["same_business_confidence"] = 1.0
             entities.append(entity); continue
         best["same_business_confidence"] = max(best.get("same_business_confidence", 0), confidence)
         if record.get("name") and record["name"] not in best.setdefault("aliases", []): best["aliases"].append(record["name"])

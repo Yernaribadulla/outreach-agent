@@ -39,15 +39,59 @@ class LMStudioClient:
             if isinstance(content, list): content = "".join(part.get("text", "") for part in content if isinstance(part, dict))
             content = str(content).replace("```json", "").replace("```", "").strip(); start, end = content.find("{"), content.rfind("}")
             if start < 0 or end < start: raise LMStudioError(f"model error: no JSON object in content; raw={content[:320]!r}")
-            result = json.loads(content[start:end + 1])
+            try: result = json.loads(content[start:end + 1])
+            except json.JSONDecodeError as exc: raise LMStudioError("invalid JSON: malformed model response") from exc
+            if not isinstance(result, dict): raise LMStudioError("invalid JSON: expected an object")
             print(f"[LM] clinic={payload.get('clinic', {}).get('name', 'unknown')} model={self.model} latency={time.perf_counter()-started:.2f}s status=success", flush=True)
             return result
         except Exception as exc:
             print(f"[LM] clinic={payload.get('clinic', {}).get('name', 'unknown')} model={self.model} latency={time.perf_counter()-started:.2f}s status=fail error={exc}", flush=True); raise
 
+    def chat_draft(self, payload: dict) -> dict:
+        """Generate an email draft using a draft-specific JSON contract."""
+        started = time.perf_counter()
+        prompt = (
+            "Ты пишешь письмо потенциальному B2B-клиенту. Только JSON, без markdown и пояснений. "
+            "Не выдумывай факты, используй только переданные evidence и соблюдай все rules из данных. "
+            "Верни объект строго с ключами subject, body, rationale, source_observations, confidence; subject/body/rationale — строки, "
+            "source_observations — массив строк, confidence — число от 0 до 1."
+        )
+        body = {"model": self.model, "temperature": 0.0, "max_tokens": 800, "messages": [{"role": "user", "content": prompt + "\nДанные:\n" + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))}]}
+        try:
+            data = self._request(body)
+            try:
+                content = data["choices"][0]["message"]["content"]
+            except (KeyError, IndexError, TypeError) as exc:
+                raise LMStudioError("missing draft content: choices[0].message.content") from exc
+            if isinstance(content, list):
+                content = "".join(part.get("text", "") for part in content if isinstance(part, dict))
+            content = str(content).replace("```json", "").replace("```", "").strip()
+            start, end = content.find("{"), content.rfind("}")
+            if start < 0 or end < start:
+                raise LMStudioError("draft response did not contain JSON")
+            try:
+                result = json.loads(content[start:end + 1])
+            except json.JSONDecodeError as exc:
+                raise LMStudioError("draft response contained malformed JSON") from exc
+            required = {"subject", "body", "rationale", "source_observations", "confidence"}
+            if not isinstance(result, dict) or set(result) != required:
+                raise LMStudioError("draft response is missing required fields")
+            if not all(isinstance(result[key], str) for key in ("subject", "body", "rationale")):
+                raise LMStudioError("draft subject, body, and rationale must be strings")
+            if not isinstance(result["source_observations"], list) or not all(isinstance(item, str) for item in result["source_observations"]):
+                raise LMStudioError("draft source_observations must be an array of strings")
+            if isinstance(result["confidence"], bool) or not isinstance(result["confidence"], (int, float)) or not 0 <= result["confidence"] <= 1:
+                raise LMStudioError("draft confidence must be a number from 0 to 1")
+            print(f"[LM] stage=draft company={(payload.get('clinic') or {}).get('name', 'unknown')} model={self.model} latency={time.perf_counter()-started:.2f}s status=success", flush=True)
+            return result
+        except Exception as exc:
+            print(f"[LM] stage=draft company={(payload.get('clinic') or {}).get('name', 'unknown')} model={self.model} latency={time.perf_counter()-started:.2f}s status=fail error={exc}", flush=True)
+            raise
+
     def chat_opportunity(self, payload: dict) -> dict:
         prompt = ("Только JSON. Ты анализируешь B2B lead по переданным evidence. Никогда не выдумывай факты, владельцев, технологии или отсутствие функций. "
-                  "Разделяй CONFIRMED, INFERRED, UNKNOWN и NOT_DETECTED. Сохраняй evidence_ids. Верни ключи: company_summary, digital_state, priority, why_this_lead, recommended_angle, sales_brief. "
+                  "Разделяй CONFIRMED, INFERRED, UNKNOWN и NOT_DETECTED. В evidence_ids используй только точные evidence_id из входных данных; указывай только evidence, которое напрямую поддерживает claim. "
+                  "Не считай HTTP-доступность подтверждением booking, CRM или AI. Верни ключи: company_summary, digital_state, priority, why_this_lead, recommended_angle, sales_brief. "
                   "digital_state должен содержать website,mobile,online_booking,crm,ai_assistant,online_payment,automation; каждый объект: status, reason, evidence_ids, confidence. priority: score и website_opportunity,booking_opportunity,crm_opportunity,ai_opportunity,automation_opportunity. ")
         body = {"model": self.model, "temperature": 0.0, "max_tokens": 900, "messages": [{"role": "user", "content": prompt + "\nEVIDENCE:\n" + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))}]}
         print(f"[LM] stage=opportunity company={payload.get('company', {}).get('name', 'unknown')} model={self.model} payload_chars={len(json.dumps(payload, ensure_ascii=False))} timeout={READ_TIMEOUT_SECONDS}s evidence_count={len(payload.get('evidence', []))}", flush=True)
@@ -56,7 +100,9 @@ class LMStudioClient:
         if isinstance(content, list): content = "".join(part.get("text", "") for part in content if isinstance(part, dict))
         content = str(content).replace("```json", "").replace("```", "").strip(); start, end = content.find("{"), content.rfind("}")
         if start < 0 or end < start: raise LMStudioError("opportunity response did not contain JSON")
-        result = json.loads(content[start:end + 1])
+        try: result = json.loads(content[start:end + 1])
+        except json.JSONDecodeError as exc: raise LMStudioError("opportunity response contained malformed JSON") from exc
+        if not isinstance(result, dict): raise LMStudioError("opportunity response must be a JSON object")
         print(f"[LM] stage=opportunity company={payload.get('company', {}).get('name', 'unknown')} status=response_received output_chars={len(content)}", flush=True)
         return result
 

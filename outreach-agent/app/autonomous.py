@@ -6,23 +6,65 @@ import time
 import traceback
 import uuid
 from typing import Any
+from urllib.parse import urlparse
 
 from .analysis.lm_studio import LMStudioClient, LMStudioError
 from .discovery.engine import discover
 from .discovery.providers import OpenStreetMapProvider
 from .email.sender import SendError
-from .generation.email_draft import generate_draft
+from .generation.email_draft import generate_draft, prepare_draft_formats
 from .storage.db import Database
+from .qualification import qualify_lead
+from .verticals import get_vertical, build_search_query, sender_config
 
 MODEL = "qwen/qwen3-vl-8b"
 
 
+class EvidenceValidationError(ValueError):
+    pass
+
+
+CLAIM_TERMS = {
+    "website": r"website|site|http",
+    "mobile": r"mobile|viewport|responsive",
+    "online_booking": r"booking|appointment|запис",
+    "whatsapp": r"whatsapp|wa\.me",
+    "online_payment": r"payment|оплат|kaspi|paybox",
+    "ai_assistant": r"ai assistant|assistant|chatbot|чат.?бот|помощник",
+    "crm": r"\bcrm\b",
+    "automation": r"automation|automated|автоматизац|follow.?up",
+}
+
+
+def prepare_evidence(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    company = payload.get("company") or {}
+    records = []
+    for index, raw in enumerate(payload.get("evidence") or [], 1):
+        item = dict(raw) if isinstance(raw, dict) else {"fact": str(raw)}
+        item.setdefault("evidence_id", f"ev-{index:03d}")
+        item["source"] = item.get("source") or item.get("source_url")
+        explicit_owner = item.get("company_name") or item.get("company")
+        if explicit_owner and str(explicit_owner).strip().casefold() != str(company.get("name") or "").strip().casefold():
+            raise EvidenceValidationError(f"Evidence {item['evidence_id']} belongs to another company")
+        records.append(item)
+    payload["evidence"] = records
+    return records
+
+
 def validate_analysis(payload: dict[str, Any], analysis: dict[str, Any]) -> dict[str, Any]:
-    """Prevent model output from upgrading unsupported facts to CONFIRMED."""
+    """Bind model claims to source-backed evidence and prevent unsupported confirmations."""
+    if not isinstance(analysis, dict):
+        raise EvidenceValidationError("LM response must be a JSON object")
+    evidence = prepare_evidence(payload)
+    company = payload.get("company") or {}
+    official_host = urlparse(str(company.get("website") or "")).netloc.lower().removeprefix("www.")
+    indexed = {item["evidence_id"]: item for item in evidence}
     state = analysis.setdefault("digital_state", {})
+    if not isinstance(state, dict):
+        raise EvidenceValidationError("digital_state must be an object")
     audit = payload.get("website_audit") or {}
     audit_status = audit.get("website_status", "UNKNOWN")
-    if not payload.get("company", {}).get("website") or audit_status in {"UNKNOWN", "NO_WEBSITE_FOUND", "WEBSITE_UNAVAILABLE"}:
+    if not company.get("website") or audit_status in {"UNKNOWN", "NO_WEBSITE_FOUND", "WEBSITE_UNAVAILABLE"}:
         state["website"] = {"status": "UNKNOWN", "reason": "No confirmed official website audit evidence was supplied.", "evidence_ids": [], "confidence": "LOW"}
         analysis["why_this_lead"] = ["No confirmed official website was found in the supplied evidence; this remains UNKNOWN and is not proof that no website exists."]
         analysis["recommended_angle"] = "Verify the clinic's official digital presence before selecting an outreach angle."
@@ -33,11 +75,55 @@ def validate_analysis(payload: dict[str, Any], analysis: dict[str, Any]) -> dict
     signals = audit.get("signals") or {}
     allowed = {"mobile": signals.get("mobile_friendly"), "online_booking": signals.get("booking"), "whatsapp": signals.get("whatsapp"), "online_payment": signals.get("online_payment")}
     for key, detected in allowed.items():
-        if key in state and not detected and state[key].get("status") == "CONFIRMED":
+        if key in state and isinstance(state[key], dict) and detected is False and state[key].get("status") == "CONFIRMED":
             state[key] = {"status": "NOT_DETECTED", "reason": "The deterministic audit did not detect this signal; absence is not proven.", "evidence_ids": [], "confidence": "LOW"}
-    for key in ("crm", "ai_assistant", "automation"):
-        if key in state and state[key].get("status") == "CONFIRMED" and not state[key].get("evidence_ids"):
-            state[key] = {"status": "UNKNOWN", "reason": "No supporting evidence was supplied.", "evidence_ids": [], "confidence": "LOW"}
+    allowed_statuses = {"CONFIRMED", "INFERRED", "UNKNOWN", "NOT_DETECTED"}
+    for key, claim in list(state.items()):
+        if not isinstance(claim, dict):
+            state[key] = {"status": "UNKNOWN", "reason": "Malformed claim; manual review is required.", "evidence_ids": [], "confidence": "LOW"}
+            continue
+        status = str(claim.get("status", "UNKNOWN")).upper()
+        if status not in allowed_statuses:
+            claim["status"] = "UNKNOWN"
+            claim["reason"] = "Unsupported claim status; manual review is required."
+            claim["evidence_ids"] = []
+            claim["confidence"] = "LOW"
+            continue
+        claim["status"] = status
+        refs = claim.get("evidence_ids") or []
+        if not isinstance(refs, list):
+            raise EvidenceValidationError(f"Evidence IDs for {key} must be a list")
+        unknown_ids = [item for item in refs if item not in indexed]
+        if unknown_ids:
+            raise EvidenceValidationError(f"Unknown evidence ID for {key}: {unknown_ids[0]}")
+        usable_refs = []
+        invalid_source = False
+        for evidence_id in refs:
+            item = indexed[evidence_id]
+            source = str(item.get("source") or "")
+            parsed = urlparse(source)
+            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                invalid_source = True
+                continue
+            source_host = parsed.netloc.lower().removeprefix("www.")
+            owner = str(item.get("company_name") or item.get("company") or "").strip().casefold()
+            owner_matches = not owner or owner == str(company.get("name") or "").strip().casefold()
+            if not owner_matches:
+                raise EvidenceValidationError(f"Evidence {evidence_id} belongs to another company")
+            if not owner and (not official_host or source_host != official_host):
+                invalid_source = True
+                continue
+            description = " ".join(str(item.get(field) or "") for field in ("fact", "snippet", "detection_reason"))
+            if status in {"CONFIRMED", "INFERRED"} and (item.get("status") != "CONFIRMED" or not re.search(CLAIM_TERMS.get(key, re.escape(key)), description, re.I)):
+                invalid_source = True
+                continue
+            usable_refs.append(evidence_id)
+        claim["evidence_ids"] = usable_refs
+        if invalid_source or (status == "CONFIRMED" and not usable_refs):
+            claim["status"] = "UNKNOWN"
+            claim["reason"] = "Supporting evidence is missing or its source/company ownership is unverified."
+            claim["evidence_ids"] = []
+            claim["confidence"] = "LOW"
     return analysis
 
 
@@ -48,6 +134,7 @@ def validate_draft(db: Database, lead: dict[str, Any], draft: dict[str, Any]) ->
     if db.conn.execute("SELECT 1 FROM send_logs WHERE lower(recipient)=lower(?)", (email,)).fetchone(): return False, "recipient already has send history"
     body = str(draft.get("body", ""))
     if not body.strip() or "traceback" in body.lower() or not lead.get("evidence"): return False, "missing evidence or invalid body"
+    if not draft.get("rationale") or not draft.get("source_observations"): return False, "draft rationale and source observations are required"
     return True, "validated"
 
 
@@ -55,13 +142,15 @@ def run_autonomous(vertical: str, city: str, target: int, db_path: str, dry_run:
     if send and not dry_run: raise SendError("Real send is intentionally disabled in development")
     db = Database(db_path)
     run_id = f"auto-{uuid.uuid4().hex[:12]}"
-    run = discover([OpenStreetMapProvider()], vertical, f"стоматология {city}", target)
-    stats = {"run_id": run_id, "discovered": len(run.candidates), "researched": 0, "qualified": 0, "emails_generated": 0, "emails_validated": 0, "ready_to_send": 0, "real_email_sends": 0, "errors": 0}
+    vertical_config = get_vertical(vertical)
+    run = discover([OpenStreetMapProvider(vertical_config)], vertical, build_search_query(vertical_config, city), target)
+    stats = {"run_id": run_id, "discovered": len(run.candidates), "researched": 0, "qualified": 0, "needs_review": 0, "disqualified": 0, "emails_generated": 0, "emails_validated": 0, "ready_to_review": 0, "real_email_sends": 0, "errors": 0}
     errors: list[dict[str, Any]] = []
     db.create_autonomous_run(run_id, vertical, target, len(run.candidates))
     clinic_ids: dict[int, int] = {}
     for lead in run.candidates:
-        clinic_ids[id(lead)] = db.add_clinic({"name": lead.get("name"), "website": lead.get("website"), "city": lead.get("city"), "phone": lead.get("phone"), "category": "dental", "source_url": lead.get("source_url"), "description": lead.get("description"), "profile": {**lead, "status": "DISCOVERED"}})
+        lead["category"] = vertical_config.category
+        clinic_ids[id(lead)] = db.add_clinic({"name": lead.get("name"), "website": lead.get("website"), "city": lead.get("city"), "phone": lead.get("phone"), "category": vertical_config.category, "source_url": lead.get("source_url"), "description": lead.get("description"), "profile": {**lead, "status": "DISCOVERED"}})
     client = LMStudioClient(os.environ.get("LM_STUDIO_BASE_URL", "http://127.0.0.1:1234/v1"), MODEL)
     try:
         available = {item.get("id") for item in client.health().get("data", [])}
@@ -74,24 +163,44 @@ def run_autonomous(vertical: str, city: str, target: int, db_path: str, dry_run:
         try:
             lead["status"] = "RESEARCHING"
             stage = "RESEARCH"
-            db.update_clinic_status(clinic_id, "RESEARCHING", lead); db.update_autonomous_run(run_id, researched=stats["researched"])
+            db.update_clinic_status(clinic_id, "RESEARCHED", lead); db.update_autonomous_run(run_id, researched=stats["researched"])
+            contact_ids = {}
             for contact in lead.get("contacts", []):
                 if contact.get("email"):
-                    db.add_contact(clinic_id, contact["email"], contact.get("source_url", lead.get("website") or lead.get("source_url") or ""))
+                    contact_id = db.add_contact(clinic_id, contact["email"], contact.get("source_url") or contact.get("source") or lead.get("website") or lead.get("source_url") or "")
+                    if contact_id: contact_ids[contact["email"].lower()] = contact_id
             stats["researched"] += 1
             db.update_autonomous_run(run_id, researched=stats["researched"])
             payload = {"company": {k: lead.get(k) for k in ("name", "city", "address", "website")}, "sources": lead.get("sources", []), "contacts": lead.get("contacts", []), "website_resolution": lead.get("website_resolution", {}), "website_audit": lead.get("website_audit", {}), "evidence": lead.get("evidence", [])}
             stage = "AI_ANALYSIS"
-            analysis = validate_analysis(payload, client.chat_opportunity(payload)); db.add_analysis(clinic_id, MODEL, payload, analysis); stats["qualified"] += 1; db.update_clinic_status(clinic_id, "QUALIFIED", {**lead, "analysis": analysis}); db.update_autonomous_run(run_id, qualified=stats["qualified"])
-            email = next((c.get("email") for c in lead.get("contacts", []) if c.get("email")), None)
+            analysis = validate_analysis(payload, client.chat_opportunity(payload)); db.add_analysis(clinic_id, MODEL, payload, analysis)
+            lead["evidence"] = payload["evidence"]
+            qualification = qualify_lead(lead, analysis, vertical_config)
+            lead["qualification"] = qualification
+            db.update_clinic_status(clinic_id, qualification["status"], {**lead, "analysis": analysis})
+            stats[qualification["status"].lower()] += 1
+            db.update_autonomous_run(run_id, qualified=stats["qualified"])
+            if qualification["status"] != "QUALIFIED": continue
+            existing_draft = db.active_draft(clinic_id)
+            if existing_draft:
+                db.update_clinic_status(clinic_id, "APPROVED" if existing_draft["status"] == "APPROVED" else "DRAFTED", {**lead, "analysis": analysis, "draft_id": existing_draft["id"]})
+                stats["ready_to_review"] += 1
+                continue
+            email = next((c.get("email") for c in lead.get("contacts", []) if c.get("email") and c.get("source_url") or c.get("email") and c.get("source")), None)
             lead["email"] = email; lead["email_claim_status"] = "CONFIRMED" if email else "UNKNOWN"
-            if not email: continue
+            contact_id = contact_ids.get(str(email).lower()) if email else None
+            if not email or not contact_id: continue
             stage = "DRAFT_GENERATION"
-            draft = generate_draft(client, lead, analysis, {"sender_name": "Ернар", "sender_brand": "DENTARA", "sender_contact": ""}); stats["emails_generated"] += 1
+            draft = generate_draft(client, lead, analysis, sender_config(vertical_config, os.environ)); stats["emails_generated"] += 1
+            draft = prepare_draft_formats(draft)
             stage = "VALIDATION"
             valid, reason = validate_draft(db, lead, draft)
             lead["validation"] = {"valid": valid, "reason": reason}
-            if valid: stats["emails_validated"] += 1; stats["ready_to_send"] += 1; db.update_clinic_status(clinic_id, "READY_TO_SEND", {**lead, "analysis": analysis, "draft_validation": lead["validation"]})
+            if valid:
+                stats["emails_validated"] += 1
+                draft_id = db.add_draft(clinic_id, contact_id, draft)
+                stats["ready_to_review"] += 1
+                db.update_clinic_status(clinic_id, "DRAFTED", {**lead, "analysis": analysis, "draft_validation": lead["validation"], "draft_id": draft_id})
         except Exception as exc:
             stats["errors"] += 1; lead["status"] = "ERROR"; lead["error"] = str(exc)[:200]
             detail = {"company": lead.get("name"), "stage": stage, "exception_type": type(exc).__name__, "message": str(exc)[:300], "traceback": traceback.format_exc(), "elapsed": round(time.perf_counter()-started, 3)}

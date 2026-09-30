@@ -10,8 +10,8 @@ from pathlib import Path
 
 from .discovery.engine import discover
 from .discovery.providers import PublicSourceProvider, TwoGISProvider, YandexProvider, WebProvider, DuckDuckGoProvider, PlaywrightTwoGISProvider, PlaywrightWebProvider, OpenStreetMapProvider
-from .discovery.real_candidates import REAL_ASTANA_CANDIDATES
-from .verticals import get_vertical
+from .discovery.datasets import curated_candidates
+from .verticals import get_vertical, build_search_query, sender_config
 from .analysis.lm_studio import LMStudioClient, LMStudioError
 from .generation.email_draft import generate_draft
 from .discovery.gemini_import import import_gemini_file
@@ -23,7 +23,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Local B2B Lead Discovery & Outreach Agent")
     sub = parser.add_subparsers(dest="command", required=True)
     d = sub.add_parser("discover"); d.add_argument("--vertical", default="dental"); d.add_argument("--target", type=int, default=10); d.add_argument("--city", default="Астана"); d.add_argument("--out", default="data"); d.add_argument("--mode", choices=("live", "offline"), default="live"); d.add_argument("--provider", choices=("default", "fallback", "osm", "playwright_2gis", "playwright_web"), default="default"); d.add_argument("--research", action="store_true")
-    p = sub.add_parser("probe"); p.add_argument("--provider", choices=("2gis", "yandex", "web"), required=True); p.add_argument("--city", default="Астана"); p.add_argument("--query", default="стоматология"); p.add_argument("--target", type=int, default=5)
+    p = sub.add_parser("probe"); p.add_argument("--provider", choices=("2gis", "yandex", "web"), required=True); p.add_argument("--vertical", default="dental"); p.add_argument("--city", default="Астана"); p.add_argument("--query"); p.add_argument("--target", type=int, default=5)
     i = sub.add_parser("import-discovery"); i.add_argument("--vertical", default="dental"); i.add_argument("--file", required=True); i.add_argument("--db", default="data/outreach.db")
     a = sub.add_parser("autonomous"); a.add_argument("--vertical", default="dental"); a.add_argument("--city", default="Астана"); a.add_argument("--target", type=int, default=100); a.add_argument("--db", default="data/outreach.db"); a.add_argument("--dry-run", action="store_true"); a.add_argument("--send", action="store_true")
     args = parser.parse_args(argv)
@@ -40,7 +40,8 @@ def main(argv: list[str] | None = None) -> int:
         providers = {"2gis": TwoGISProvider(), "yandex": YandexProvider(), "web": WebProvider()}
         provider = providers[args.provider]
         try:
-            results = provider.search(f"{args.query} {args.city}", args.target)
+            vertical = get_vertical(args.vertical)
+            results = provider.search(f"{args.query} {args.city}" if args.query else build_search_query(vertical, args.city), args.target)
             print(json.dumps({"provider": args.provider, "status": "SUCCESS", "count": len(results), "candidates": [{"name": x.get("name"), "source_url": x.get("source_url")} for x in results[:5]]}, ensure_ascii=False, indent=2))
         except Exception as exc:
             print(json.dumps({"provider": args.provider, "status": "SOURCE_UNAVAILABLE", "error_type": type(exc).__name__, "reason": str(exc)[:240]}, ensure_ascii=False, indent=2))
@@ -48,30 +49,31 @@ def main(argv: list[str] | None = None) -> int:
     if args.command != "discover": return 2
     if args.provider == "playwright_2gis":
         try:
-            results = PlaywrightTwoGISProvider().search(f"стоматология {args.city}", args.target)
+            results = PlaywrightTwoGISProvider().search(f"{get_vertical(args.vertical).search_terms[0]} {args.city}", args.target)
             print(json.dumps({"provider": "PlaywrightTwoGIS", "status": "SUCCESS", "count": len(results), "candidates": results[:5]}, ensure_ascii=False, indent=2))
         except Exception as exc:
             print(json.dumps({"provider": "PlaywrightTwoGIS", "status": "SOURCE_UNAVAILABLE", "error_type": type(exc).__name__, "reason": str(exc)[:240]}, ensure_ascii=False, indent=2))
         return 0
     if args.provider == "playwright_web":
         try:
-            results = PlaywrightWebProvider().search(f"стоматология {args.city}", args.target)
+            results = PlaywrightWebProvider().search(f"{get_vertical(args.vertical).search_terms[0]} {args.city}", args.target)
             print(json.dumps({"provider": "PlaywrightWeb", "status": "SUCCESS", "count": len(results), "candidates": results[:5]}, ensure_ascii=False, indent=2))
         except Exception as exc:
             print(json.dumps({"provider": "PlaywrightWeb", "status": "SOURCE_UNAVAILABLE", "error_type": type(exc).__name__, "reason": str(exc)[:240]}, ensure_ascii=False, indent=2))
         return 0
     vertical = get_vertical(args.vertical)
-    if vertical.key != "dental":
-        print(f"Vertical {vertical.key} configured, but no live provider records are enabled yet.", file=sys.stderr); return 2
     if getattr(args, "provider", "default") == "fallback":
-        providers = [OpenStreetMapProvider(), DuckDuckGoProvider(), WebProvider(), YandexProvider(), TwoGISProvider()]
+        providers = [OpenStreetMapProvider(vertical, args.city), DuckDuckGoProvider(), WebProvider(), YandexProvider(), TwoGISProvider()]
     elif getattr(args, "provider", "default") == "osm":
-        providers = [OpenStreetMapProvider()]
+        providers = [OpenStreetMapProvider(vertical, args.city)]
     elif args.mode == "offline":
-        providers = [PublicSourceProvider("reviewed project records", REAL_ASTANA_CANDIDATES)]
+        records = curated_candidates(vertical.key)
+        if not records:
+            print(f"No curated records are configured for vertical {vertical.key}.", file=sys.stderr); return 2
+        providers = [PublicSourceProvider("reviewed project records", records)]
     else:
         providers = [PlaywrightWebProvider(), PlaywrightTwoGISProvider(), TwoGISProvider(), YandexProvider(), WebProvider()]
-    run = discover(providers, vertical.key, f"{vertical.search_terms[0]} {args.city}", args.target, audit_websites=bool(args.research))
+    run = discover(providers, vertical.key, build_search_query(vertical, args.city), args.target, audit_websites=bool(args.research))
     osm_stats = None
     if getattr(args, "provider", "default") == "osm":
         db = Database("data/outreach.db"); before = {row["id"] for row in db.conn.execute("SELECT id FROM clinics")}
@@ -109,7 +111,7 @@ def main(argv: list[str] | None = None) -> int:
                 email = next((x.get("value") for x in lead.get("contacts", []) if x.get("type") == "PUBLIC_BUSINESS_EMAIL"), None)
                 lead["email"] = email
                 if email:
-                    draft = generate_draft(client, lead, lead["lm_analysis"], {"sender_name": "", "sender_brand": "DENTARA", "sender_contact": ""})
+                    draft = generate_draft(client, lead, lead["lm_analysis"], sender_config(vertical, os.environ))
                     body = draft.get("body", ""); draft["plain_text"] = body; draft["html"] = f'<div style="font:15px Arial;line-height:1.6">{escape(body).replace(chr(10), "<br>")}</div>'; lead["email_draft"] = draft; drafts += 1
             except (LMStudioError, ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
                 lead["lm_status"] = "LM_STUDIO_ERROR"; lead["lm_error"] = str(exc)[:200]

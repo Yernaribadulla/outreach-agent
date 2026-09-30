@@ -34,7 +34,7 @@ From the repository root, open `index.html` in a modern browser. The project is 
 
 All people, patients, statistics, addresses, testimonials, and treatment content are fictional or illustrative demo content. DENTARA is not a real clinic and is not medical advice.
 
-## Outreach Agent — V2
+## Outreach Agent — V3.1
 
 `outreach-agent` is a local-first B2B sales intelligence and outreach automation platform for discovering and researching potential business clients, building structured opportunity profiles, and preparing personalized outreach drafts.
 
@@ -65,6 +65,14 @@ Discovery
 ```
 
 Deterministic facts are collected in Python where possible. AI analysis must use the supplied evidence, preserve provenance, distinguish confirmed and unknown states, and never invent contacts, websites, owners, technologies, or business problems.
+
+### Evidence-first email drafts
+
+Dental outreach drafts use the saved lead brief, research evidence, `digital_state`, opportunities, and recommended angle. The generator selects one primary angle and at most two additional offer elements. A clinic's `NOT_DETECTED` or `UNKNOWN` feature is not described as definitely absent; it can only support a cautious offer to add or discuss a capability when that angle fits the available evidence.
+
+The dental offer may include a modern clinic website, a patient-facing AI assistant, online booking, online payment, and optional workflow automation or integrations. Drafts should explain the assistant in plain language, avoid unsupported clinic claims or promised outcomes, and include the configured demo URL: <https://yernaribadulla.github.io/Dentist_rus_commercial/>. The plain-text email is the canonical body; the escaped HTML preview is generated from the same text and contains no email-side JavaScript.
+
+Draft generation uses its own JSON contract, separate from the LM analysis contract. A generated draft remains a review item; approval does not send email.
 
 ### How the projects are related
 
