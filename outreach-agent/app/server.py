@@ -56,6 +56,20 @@ def config(env: dict[str, str], vertical: str = "dental") -> dict[str, str]:
     return sender_config(vertical, env)
 
 
+def discovery_limit(value: object) -> int:
+    if isinstance(value, bool):
+        raise ValueError("Discovery limit must be a positive integer.")
+    if isinstance(value, int):
+        limit = value
+    elif isinstance(value, str) and re.fullmatch(r"[0-9]+", value.strip()):
+        limit = int(value.strip())
+    else:
+        raise ValueError("Discovery limit must be a positive integer.")
+    if not 1 <= limit <= 100:
+        raise ValueError("Discovery limit must be between 1 and 100.")
+    return limit
+
+
 def lm_client(env: dict[str, str]) -> LMStudioClient:
     required = "qwen/qwen3-vl-8b"
     configured = env.get("LM_STUDIO_MODEL", required)
@@ -525,12 +539,13 @@ class Handler(BaseHTTPRequestHandler):
             return self.json(200, {"lm_studio_url": client.base_url, "lm_studio_model": client.model, "smtp_enabled": smtp_enabled, "smtp_configured": _smtp_configuration_ready(env), "provider": "smtp" if smtp_enabled else "simulated", "smtp_host": "", "smtp_port": "", "sender_email": env.get("SMTP_FROM", env.get("SENDER_EMAIL", "")), "real_sends": int(DB.conn.execute("SELECT COUNT(*) FROM send_logs WHERE provider='smtp' AND status='SENT'").fetchone()[0]), "max_sends_per_batch": _setting_int(env, "MAX_SENDS_PER_BATCH", 50, 1, 500), "daily_send_limit": _setting_int(env, "SMTP_DAILY_LIMIT", 50, 1, 10000), "min_send_delay_seconds": _setting_int(env, "SMTP_MIN_DELAY_SECONDS", 30, 1, 86400), "cooldown": DB.provider_cooldown(), **current_config})
         if path == "/api/health":
             env=load_env()
+            capabilities = {"verticals": True, "discovery": True, "batch_analysis": True, "send_batch": True}
             try:
                 client=lm_client(env)
-                return self.json(200, {"lm_studio": True, "models": client.health()})
+                return self.json(200, {"lm_studio": True, "models": client.health(), "capabilities": capabilities})
             except Exception as exc:
                 print(f"[HEALTH] LM Studio unavailable: {type(exc).__name__}: {str(exc)[:240]}", flush=True)
-                return self.json(200, {"lm_studio": False, "error": "LM Studio недоступен или настроенная модель не загружена."})
+                return self.json(200, {"lm_studio": False, "error": "LM Studio недоступен или настроенная модель не загружена.", "capabilities": capabilities})
         if path == "/":
             raw=UI.read_bytes(); self.send_response(200); self.send_header("Content-Type","text/html; charset=utf-8"); self.send_header("Content-Length",str(len(raw))); self.end_headers(); self.wfile.write(raw); return
         if path == "/review.js":
@@ -545,7 +560,8 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 vertical = get_vertical(str(data.get("vertical", "dental")))
                 city = str(data.get("city", "Астана")).strip()
-                target = max(1, min(100, int(data.get("target_count", 10))))
+                target = discovery_limit(data.get("target_count", 10))
+                if not city: raise ValueError("City is required.")
             except (ValueError, TypeError) as exc:
                 return self.json(400, {"error": "Проверьте вертикаль, город и количество компаний."})
             run_id = f"disc-{uuid.uuid4().hex[:12]}"
@@ -558,7 +574,8 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 vertical = get_vertical(str(data.get("vertical", "dental")))
                 city = str(data.get("city", "Астана")).strip()
-                target = max(1, min(100, int(data.get("target_count", 10))))
+                target = discovery_limit(data.get("target_count", 10))
+                if not city: raise ValueError("City is required.")
             except (ValueError, TypeError):
                 return self.json(400, {"error": "Проверьте вертикаль, город и количество компаний."})
             if data.get("mock"):

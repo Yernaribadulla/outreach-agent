@@ -8,6 +8,8 @@
     view: 'overview', clinics: [], queue: [], settings: {}, dashboard: {},
     activity: [], verticals: [], detail: null, discovery: null, analysisBusy: new Set(),
     batch: null, send: null, batchAvailable: 0, sendPreview: null,
+    batchApiAvailable: false, sendApiAvailable: false,
+    batchApiError: '', sendApiError: '',
   };
   const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
@@ -23,7 +25,12 @@
     const response = await fetch(url, options);
     let body;
     try { body = await response.json(); } catch { body = {}; }
-    if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
+    if (!response.ok) {
+      const error = new Error(body.error || `HTTP ${response.status}`);
+      error.status = response.status;
+      error.endpoint = url;
+      throw error;
+    }
     return body;
   };
   const get = (url) => api(url);
@@ -41,19 +48,37 @@
   const qualificationBadge = (value) => statusBadge(value || 'NEEDS_REVIEW');
 
   async function load() {
-    const [dashboard, clinics, queue, activity, settings, verticals, health, batch, send, eligible] = await Promise.all([
+    const [dashboard, clinics, queue, activity, settings, verticals, health] = await Promise.all([
       get('/api/dashboard'), get('/api/clinics'), get('/api/queue'), get('/api/activity'),
       get('/api/settings'), get('/api/verticals'), get('/api/health'),
-      get('/api/batches/latest'), get('/api/send-batches/latest'), get('/api/batches/eligible?vertical=dental'),
     ]);
+    const items = Array.isArray(verticals.items) ? verticals.items.filter((item) => item?.key) : [];
+    const preferredVertical = items.find((item) => item.key === 'dental')?.key || items[0]?.key || '';
+    const capabilities = health.capabilities || {};
+    const hasBatchApi = Boolean(capabilities.batch_analysis);
+    const hasSendApi = Boolean(capabilities.send_batch);
+    const [batchResult, sendResult, eligibleResult] = await Promise.allSettled([
+      hasBatchApi ? get('/api/batches/latest') : Promise.resolve({ job: null }),
+      hasSendApi ? get('/api/send-batches/latest') : Promise.resolve({ job: null }),
+      hasBatchApi && preferredVertical
+        ? get(`/api/batches/eligible?vertical=${encodeURIComponent(preferredVertical)}`)
+        : Promise.resolve({ available: 0 }),
+    ]);
+    const batchApiAvailable = hasBatchApi && batchResult.status === 'fulfilled' && eligibleResult.status === 'fulfilled';
+    const sendApiAvailable = hasSendApi && sendResult.status === 'fulfilled';
     Object.assign(state, {
       dashboard, clinics: clinics.items || [], queue: queue.items || [],
-      activity: activity.items || [], settings, verticals: verticals.items || [],
-      batch: batch.job, send: send.job, batchAvailable: eligible.available || 0,
+      activity: activity.items || [], settings, verticals: items,
+      batch: batchApiAvailable ? batchResult.value.job : null,
+      send: sendApiAvailable ? sendResult.value.job : null,
+      batchApiAvailable, sendApiAvailable,
+      batchApiError: batchResult.status === 'rejected' ? batchResult.reason.message : eligibleResult.status === 'rejected' ? eligibleResult.reason.message : hasBatchApi ? '' : 'This running backend does not advertise persistent batch endpoints.',
+      sendApiError: sendResult.status === 'rejected' ? sendResult.reason.message : hasSendApi ? '' : 'This running backend does not advertise send-batch endpoints.',
+      batchAvailable: eligibleResult.status === 'fulfilled' ? Number(eligibleResult.value.available || 0) : 0,
     });
     topStatus.textContent = health.lm_studio
-      ? `Локальная AI-модель · ${settings.lm_studio_model}`
-      : 'LM Studio недоступен';
+      ? `Backend connected · ${settings.lm_studio_model}`
+      : 'Backend connected · LM Studio unavailable';
     document.getElementById('sidebar-provider').textContent = health.lm_studio
       ? `LM Studio · ${settings.lm_studio_model}` : 'LM Studio недоступен';
     document.getElementById('sidebar-send').textContent = settings.smtp_configured ? 'Real SMTP configured' : 'SMTP disabled';
@@ -77,7 +102,11 @@
     const seconds = Math.max(0, Math.floor(((Date.parse(finished || new Date().toISOString()) || Date.now()) - Date.parse(started)) / 1000));
     return `${Math.floor(seconds / 60)}m ${String(seconds % 60).padStart(2, '0')}s`;
   };
-  const verticalOptions = (selected = 'dental') => state.verticals.map((item) => `<option value="${esc(item.key)}" ${item.key === selected ? 'selected' : ''}>${esc(item.label)}</option>`).join('');
+  const defaultVertical = () => state.verticals.find((item) => item.key === 'dental')?.key || state.verticals[0]?.key || '';
+  const verticalLabel = (item) => ({ dental: 'Dental', detailing: 'Detailing' })[item.key] || item.label || item.key;
+  const verticalOptions = (selected = defaultVertical()) => state.verticals.length
+    ? state.verticals.map((item) => `<option value="${esc(item.key)}" ${item.key === selected ? 'selected' : ''}>${esc(verticalLabel(item))}</option>`).join('')
+    : '<option value="" selected disabled>No verticals configured</option>';
 
   function batchStatus(job) {
     if (!job) return '<p class="muted">Batch ещё не запускался.</p>';
@@ -107,26 +136,30 @@
     const sendNode = document.getElementById('send-panel');
     if (batchNode) batchNode.innerHTML = `<span class="kicker">NIGHTLY RUN</span><h2>Анализ + генерация писем</h2>
       <p>Batch обрабатывает уже найденные компании и сохраняет прогресс в SQLite. Для новых компаний сначала используйте Discovery.</p>
-      <div class="workflow-form"><label>Vertical<select id="batch-vertical">${verticalOptions()}</select></label>
+      ${state.batchApiAvailable ? '' : `<p class="error-copy">Batch API unavailable: ${esc(state.batchApiError || 'unsupported by the running backend')}.</p>`}
+      <div class="workflow-form"><label>Vertical<select id="batch-vertical" ${state.verticals.length ? '' : 'disabled'}>${verticalOptions()}</select></label>
       <label>Количество клиник<input id="batch-count" type="number" min="1" max="100" value="20"></label><span class="muted">Сейчас подходит к batch: <b id="batch-available">${Number(state.batchAvailable || 0)}</b></span>
-      <button class="button primary" data-action="batch-start" ${state.batch?.status === 'RUNNING' ? 'disabled' : ''}>Запустить анализ + генерацию</button></div>
+      <button class="button primary" data-action="batch-start" ${!state.batchApiAvailable || !state.verticals.length || state.batch?.status === 'RUNNING' ? 'disabled' : ''}>Запустить анализ + генерацию</button></div>
       <div class="job-monitor">${batchStatus(state.batch)}</div>`;
     if (sendNode) sendNode.innerHTML = `<span class="kicker">EXPLICIT SEND · SEQUENTIAL</span><h2>Отправка писем</h2>
       <p>Только APPROVED письма с публичным контактом. До подтверждения ни одно письмо не отправляется.</p>
       <p class="ready-count"><b>${Number(state.dashboard.ready_to_send || 0)}</b> писем готовы к отправке</p>
-      <div class="workflow-form send-form"><label>Vertical<select id="send-vertical">${verticalOptions()}</select></label>
+      ${state.sendApiAvailable ? '' : `<p class="error-copy">Send API unavailable: ${esc(state.sendApiError || 'unsupported by the running backend')}.</p>`}
+      <div class="workflow-form send-form"><label>Vertical<select id="send-vertical" ${state.verticals.length ? '' : 'disabled'}>${verticalOptions()}</select></label>
       <label>Количество<input id="send-count" type="number" min="1" max="500" value="${Math.max(1, Math.min(10, Number(state.dashboard.ready_to_send || 0)))}"></label>
       <label>Режим<select id="send-mode"><option value="REAL_SMTP" ${state.settings.smtp_configured ? '' : 'disabled'}>Real SMTP${state.settings.smtp_configured ? '' : ' · unavailable'}</option><option value="SIMULATED_SEND" ${state.settings.smtp_configured ? '' : 'selected'}>SIMULATED_SEND · no email</option></select></label>
       <label>Min interval, sec<input id="send-min-delay" type="number" min="0" max="86400" value="${state.settings.smtp_configured ? 45 : 0}"></label>
       <label>Max interval, sec<input id="send-max-delay" type="number" min="0" max="86400" value="${state.settings.smtp_configured ? 120 : 0}"></label>
-      <button class="button primary" data-action="send-preview" ${Number(state.dashboard.ready_to_send || 0) < 1 || state.send?.status === 'RUNNING' || state.send?.status === 'SEND_INTERRUPTED' ? 'disabled' : ''}>${state.settings.smtp_configured ? 'ОТПРАВИТЬ ПИСЬМА' : 'Запустить симуляцию'}</button></div>
+      <button class="button primary" data-action="send-preview" ${!state.sendApiAvailable || !state.verticals.length || Number(state.dashboard.ready_to_send || 0) < 1 || state.send?.status === 'RUNNING' || state.send?.status === 'SEND_INTERRUPTED' ? 'disabled' : ''}>${state.settings.smtp_configured ? 'ОТПРАВИТЬ ПИСЬМА' : 'Запустить симуляцию'}</button></div>
       <small class="muted">Max/batch ${Number(state.settings.max_sends_per_batch || 50)} · daily provider limit ${Number(state.settings.daily_send_limit || 50)} · real SMTP ${state.settings.smtp_enabled ? 'enabled' : 'disabled'}</small>
       <div class="job-monitor">${sendStatus(state.send)}</div>`;
     batchNode?.querySelector('#batch-vertical')?.addEventListener('change', async (event) => {
+      if (!state.batchApiAvailable) return;
       try { const result = await get(`/api/batches/eligible?vertical=${encodeURIComponent(event.target.value)}`); state.batchAvailable = result.available || 0; batchNode.querySelector('#batch-available').textContent = String(state.batchAvailable); }
       catch (error) { toast(error.message); }
     });
     sendNode?.querySelector('#send-vertical')?.addEventListener('change', async (event) => {
+      if (!state.sendApiAvailable) return;
       try { const result = await get(`/api/send-batches/ready?vertical=${encodeURIComponent(event.target.value)}`); sendNode.querySelector('.ready-count b').textContent = String(result.count || 0); }
       catch (error) { toast(error.message); }
     });
@@ -469,12 +502,14 @@
   }
 
   async function discoveryView() {
-    const options = state.verticals.map((item) => `<option value="${esc(item.key)}">${esc(item.label)}</option>`).join('');
+    const options = verticalOptions();
+    const hasVerticals = state.verticals.length > 0;
     app.innerHTML = `<section class="surface"><span class="kicker">LIVE PUBLIC SOURCE DISCOVERY</span><h2>Найти компании</h2>
-      <div class="form-grid"><label>Город<input id="discovery-city" value="Астана"></label>
-        <label>Vertical<select id="discovery-vertical">${options}</select></label>
-        <label>Лимит<input id="discovery-target" type="number" min="1" max="100" value="5"></label>
-        <button class="button primary" data-action="discover">Запустить поиск</button></div>
+      ${hasVerticals ? '' : '<p class="error-copy">No verticals are configured by the backend. Discovery is disabled.</p>'}
+      <div class="form-grid"><label>Город<input id="discovery-city" value="Astana" required></label>
+        <label>Vertical<select id="discovery-vertical" required ${hasVerticals ? '' : 'disabled'}>${options}</select></label>
+        <label>Лимит<input id="discovery-target" type="number" min="1" max="100" step="1" value="10" required></label>
+        <button class="button primary" data-action="discover" ${hasVerticals ? '' : 'disabled'}>Запустить поиск</button></div>
       <div id="discovery-status" role="status" aria-live="polite"></div><div id="discovery-log" class="timeline"></div></section>`;
     if (state.discovery) renderDiscoveryState(state.discovery);
     else {
@@ -482,7 +517,7 @@
         const latest = await get('/api/discovery/latest');
         if (latest.run) { state.discovery = latest.run; renderDiscoveryState(state.discovery); }
       } catch (error) {
-        document.getElementById('discovery-status').innerHTML = `<p class="error-copy">Не удалось загрузить сохранённый результат: ${esc(error.message)}</p>`;
+        document.getElementById('discovery-status').innerHTML = `<p class="error-copy">Backend API unavailable: ${esc(error.message)}</p>`;
       }
     }
   }
@@ -491,7 +526,7 @@
     const box = document.getElementById('discovery-status');
     const log = document.getElementById('discovery-log');
     if (!box || !log) return;
-    const running = !['COMPLETE', 'FAILED', 'INTERRUPTED'].includes(run.status);
+    const running = !['COMPLETE', 'FAILED', 'INTERRUPTED', 'BACKEND_UNAVAILABLE'].includes(run.status);
     const button = app.querySelector('[data-action="discover"]');
     if (button) { button.disabled = running; button.innerHTML = running ? '<span class="spinner inline-spinner"></span> Поиск...' : 'Запустить поиск'; }
     const statusLabels = {
@@ -499,25 +534,39 @@
       INSPECTING_WEBSITES: 'Inspecting websites...', FINDING_PUBLIC_CONTACTS: 'Finding public contacts...',
       PERSISTING_RESULTS: 'Сохраняем найденные компании...', INTERRUPTED: 'Поиск прерван перезапуском сервера.',
     };
+    const sourceStatuses = Object.values(run.source_status || {});
+    const providersUnavailable = sourceStatuses.length > 0 && sourceStatuses.every((value) => value === 'SOURCE_UNAVAILABLE');
     if (run.status === 'COMPLETE') box.innerHTML = `<p class="success-copy">Поиск завершён · найдено ${Number(run.count || 0)}</p>`;
-    else if (run.status === 'FAILED' || run.status === 'INTERRUPTED') box.innerHTML = `<p class="error-copy">${run.status === 'INTERRUPTED' ? 'Поиск остановлен' : 'Не удалось выполнить поиск'}</p><p>${esc(run.error || 'Источник не вернул подтверждённые результаты.')}</p>`;
+    else if (run.status === 'BACKEND_UNAVAILABLE') box.innerHTML = `<p class="error-copy">Backend API unavailable</p><p>${esc(run.error || 'The discovery endpoint could not be reached.')}</p>`;
+    else if (run.status === 'FAILED' || run.status === 'INTERRUPTED') box.innerHTML = `<p class="error-copy">${providersUnavailable ? 'SOURCE_UNAVAILABLE' : run.status === 'INTERRUPTED' ? 'Поиск остановлен' : 'Не удалось выполнить поиск'}</p><p>${esc(run.error || 'Источник не вернул подтверждённые результаты.')}</p>`;
     else box.innerHTML = `<p><span class="spinner inline-spinner"></span> ${esc(statusLabels[run.status] || 'Поиск...')}</p>`;
-    const providers = Object.entries(run.source_status || {}).map(([name, value]) => `<span class="badge ${value === 'SUCCESS' ? 'approved' : 'unknown'}">${esc(name)} · ${value === 'SUCCESS' ? 'доступен' : 'источник недоступен'}</span>`).join(' ');
+    const providers = Object.entries(run.source_status || {}).map(([name, value]) => `<span class="badge ${value === 'SUCCESS' ? 'approved' : 'unknown'}">${esc(name)} · ${esc(value)}</span>`).join(' ');
     const events = (run.activity || []).map((event) => `<article><b>${esc(event.type || 'DISCOVERY')}</b><p>${esc(event.message || (event.count != null ? `Найдено: ${event.count}` : event.provider || ''))}</p>${event.error ? `<small class="error-copy">${esc(event.error)}</small>` : ''}</article>`).join('');
     const candidates = (run.candidates || []).map((lead) => `<article class="discovery-result"><b>${esc(lead.name || 'Company name unavailable')}</b><p>${esc(lead.city || run.city || '')} · ${esc(lead.website || 'Website unavailable')}</p>${lead.source_url ? `<a href="${esc(lead.source_url)}" target="_blank" rel="noreferrer">Public source</a>` : ''}</article>`).join('');
     log.innerHTML = `${providers ? `<p>${providers}</p>` : ''}${events}${candidates}`;
   }
 
   async function startDiscovery(button) {
+    const vertical = document.getElementById('discovery-vertical')?.value || '';
+    const city = document.getElementById('discovery-city')?.value.trim() || '';
+    const targetCount = document.getElementById('discovery-target')?.valueAsNumber;
+    if (!vertical || !state.verticals.some((item) => item.key === vertical)) {
+      document.getElementById('discovery-status').innerHTML = '<p class="error-copy">Choose a configured vertical.</p>';
+      return;
+    }
+    if (!city || !Number.isInteger(targetCount) || targetCount < 1 || targetCount > 100) {
+      document.getElementById('discovery-status').innerHTML = '<p class="error-copy">Enter a city and a whole-number limit from 1 to 100.</p>';
+      return;
+    }
     button.disabled = true;
     button.innerHTML = '<span class="spinner inline-spinner"></span> Поиск...';
     state.discovery = { status: 'SEARCHING_SOURCES', activity: [], source_status: {} };
     renderDiscoveryState(state.discovery);
     try {
       const started = await post('/api/discovery/start', {
-        city: document.getElementById('discovery-city').value,
-        vertical: document.getElementById('discovery-vertical').value,
-        target_count: Number(document.getElementById('discovery-target').value || 5),
+        city,
+        vertical,
+        target_count: targetCount,
       });
       state.discovery = { ...state.discovery, ...started };
       renderDiscoveryState(state.discovery);
@@ -529,7 +578,7 @@
       await load();
       if (state.discovery.status === 'COMPLETE') toast(`Поиск завершён · ${Number(state.discovery.count || 0)} компаний`);
     } catch (error) {
-      state.discovery = { status: 'FAILED', error: error.message, source_status: {}, activity: [] };
+      state.discovery = { status: 'BACKEND_UNAVAILABLE', error: error.message, source_status: {}, activity: [] };
       renderDiscoveryState(state.discovery);
     }
   }
@@ -602,7 +651,7 @@
   });
 
   load().then(() => render('overview')).catch((error) => {
-    topStatus.textContent = 'API unavailable';
-    app.innerHTML = `<section class="empty-state">Не удалось загрузить workspace: ${esc(error.message)}</section>`;
+    topStatus.textContent = 'Backend API unavailable';
+    app.innerHTML = `<section class="empty-state">Backend API unavailable: ${esc(error.message)}</section>`;
   });
 })();

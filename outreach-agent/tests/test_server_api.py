@@ -88,6 +88,79 @@ class DashboardApiTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(dashboard["needs_review"], 1)
 
+    def test_health_vertical_dashboard_and_batch_contracts(self):
+        with patch("app.server.lm_client") as client_factory:
+            client_factory.return_value.health.return_value = {"data": [{"id": "qwen/qwen3-vl-8b"}]}
+            health_status, health = self.request("GET", "/api/health")
+        self.assertEqual(health_status, 200)
+        self.assertTrue(health["lm_studio"])
+        self.assertTrue(health["capabilities"]["batch_analysis"])
+        self.assertTrue(health["capabilities"]["send_batch"])
+
+        vertical_status, verticals = self.request("GET", "/api/verticals")
+        self.assertEqual(vertical_status, 200)
+        vertical_map = {item["key"]: item["label"] for item in verticals["items"]}
+        self.assertEqual(vertical_map["dental"], "Dental")
+        self.assertEqual(vertical_map["detailing"], "Detailing")
+
+        for path in ("/api/dashboard", "/api/batches/latest", "/api/send-batches/latest", "/api/discovery/latest"):
+            with self.subTest(path=path):
+                status, _ = self.request("GET", path)
+                self.assertEqual(status, 200)
+        status, eligibility = self.request("GET", "/api/batches/eligible?vertical=detailing")
+        self.assertEqual(status, 200)
+        self.assertEqual(eligibility["vertical"], "detailing")
+
+    def test_empty_vertical_configuration_is_explicit_and_ui_disables_discovery(self):
+        with patch.dict(server.VERTICALS, {}, clear=True):
+            status, payload = self.request("GET", "/api/verticals")
+            self.assertEqual(status, 200)
+            self.assertEqual(payload["items"], [])
+            status, result = self.request("POST", "/api/discovery/start", {"vertical": "dental", "city": "Astana", "target_count": 10})
+            self.assertEqual(status, 400)
+            self.assertIn("Проверьте", result["error"])
+        ui = (server.UI.parent / "review.js").read_text(encoding="utf-8")
+        self.assertIn("No verticals configured", ui)
+        self.assertIn("${hasVerticals ? '' : 'disabled'}", ui)
+
+    def test_discovery_start_passes_vertical_city_and_integer_limit_to_worker(self):
+        captured = []
+        finished = threading.Event()
+
+        def capture_worker(run_id, vertical, city, limit):
+            captured.append((run_id, vertical, city, limit))
+            finished.set()
+
+        with patch("app.server._discovery_worker", side_effect=capture_worker):
+            status, response = self.request("POST", "/api/discovery/start", {"vertical": "detailing", "city": "Astana", "target_count": 10})
+            self.assertEqual(status, 202)
+            self.assertTrue(finished.wait(1))
+        self.assertEqual(captured[0][1:], ("detailing", "Astana", 10))
+        run_status, run = self.request("GET", f"/api/discovery/{response['run_id']}")
+        self.assertEqual(run_status, 200)
+        self.assertEqual((run["vertical"], run["city"], run["target_count"]), ("detailing", "Astana", 10))
+
+    def test_discovery_start_defaults_to_configured_dental_vertical(self):
+        captured = []
+        finished = threading.Event()
+
+        def capture_worker(run_id, vertical, city, limit):
+            captured.append((vertical, city, limit))
+            finished.set()
+
+        with patch("app.server._discovery_worker", side_effect=capture_worker):
+            status, _ = self.request("POST", "/api/discovery/start", {"city": "Astana", "target_count": 10})
+            self.assertEqual(status, 202)
+            self.assertTrue(finished.wait(1))
+        self.assertEqual(captured, [("dental", "Astana", 10)])
+
+    def test_discovery_limit_rejects_nonpositive_or_fractional_values(self):
+        for limit in (0, -1, 1.5, True):
+            with self.subTest(limit=limit):
+                status, result = self.request("POST", "/api/discovery/start", {"vertical": "dental", "city": "Astana", "target_count": limit})
+                self.assertEqual(status, 400)
+                self.assertIn("Проверьте", result["error"])
+
     def test_discovery_api_reports_all_providers_unavailable_as_failure(self):
         from app.discovery.engine import DiscoveryRun
         unavailable = DiscoveryRun("dental", "стоматология Астана", source_status={"duckduckgo": "SOURCE_UNAVAILABLE", "web": "SOURCE_UNAVAILABLE"})

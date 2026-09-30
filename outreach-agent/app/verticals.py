@@ -20,7 +20,7 @@ class VerticalConfig:
 
 VERTICALS = {
     "dental": VerticalConfig(
-        "dental", "Стоматологические клиники", ("стоматология", "стоматологическая клиника"),
+        "dental", "Dental", ("стоматология", "стоматологическая клиника"),
         ("online_booking", "ai_assistant", "crm", "online_payment", "patient_communication"),
         "dental", "Современный сайт для клиники, ИИ-ассистент для вопросов пациентов и помощи с записью, онлайн-запись и онлайн-оплата; при необходимости — автоматизация процессов и интеграции.", "DENTARA",
         "https://yernaribadulla.github.io/Dentist_rus_commercial/",
@@ -28,7 +28,7 @@ VERTICALS = {
         ("Использовать только публичные сведения о клинике.", "Не давать медицинских или пациентских утверждений.", "Не утверждать отсутствие функции по NOT_DETECTED; предлагать её как возможное дополнение только при релевантных evidence."),
     ),
     "detailing": VerticalConfig(
-        "detailing", "Detailing centers", ("детейлинг", "автодетейлинг"),
+        "detailing", "Detailing", ("детейлинг", "автодетейлинг"),
         ("service_catalog", "booking", "whatsapp", "before_after", "crm", "follow_up", "online_payment"),
         "detailing", "Digital customer experience for detailing centers",
         cta="Offer a brief conversation about the customer journey.",
