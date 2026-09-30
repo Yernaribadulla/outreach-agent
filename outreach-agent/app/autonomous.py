@@ -30,7 +30,8 @@ CLAIM_TERMS = {
     "online_booking": r"booking|appointment|запис",
     "whatsapp": r"whatsapp|wa\.me",
     "online_payment": r"payment|оплат|kaspi|paybox",
-    "ai_assistant": r"ai assistant|assistant|chatbot|чат.?бот|помощник",
+    "ai_assistant": r"ai[- ](?:powered[- ])?assistant|ai[- ]powered chatbot|artificial intelligence|ии[- ]?ассистент|искусственн\w+ интеллект",
+    "chat_widget": r"chat|чат|widget|виджет|tawk|jivo|chatra|intercom|livechat",
     "crm": r"\bcrm\b",
     "automation": r"automation|automated|автоматизац|follow.?up",
 }
@@ -73,10 +74,27 @@ def validate_analysis(payload: dict[str, Any], analysis: dict[str, Any]) -> dict
         for key in ("score", "website_opportunity", "booking_opportunity", "crm_opportunity", "ai_opportunity", "automation_opportunity"):
             priority[key] = 0 if key == "score" else False
     signals = audit.get("signals") or {}
-    allowed = {"mobile": signals.get("mobile_friendly"), "online_booking": signals.get("booking"), "whatsapp": signals.get("whatsapp"), "online_payment": signals.get("online_payment")}
+    allowed = {"mobile": signals.get("mobile_friendly"), "online_booking": signals.get("booking"), "whatsapp": signals.get("whatsapp"), "online_payment": signals.get("online_payment"), "ai_assistant": signals.get("ai_assistant")}
     for key, detected in allowed.items():
         if key in state and isinstance(state[key], dict) and detected is False and state[key].get("status") == "CONFIRMED":
             state[key] = {"status": "NOT_DETECTED", "reason": "The deterministic audit did not detect this signal; absence is not proven.", "evidence_ids": [], "confidence": "LOW"}
+    chat_widget_detected = signals.get("chat_widget") is True or signals.get("chat") is True
+    if chat_widget_detected:
+        chat_evidence_ids = [
+            str(item.get("evidence_id")) for item in evidence
+            if item.get("status") == "CONFIRMED" and re.search(r"chat_widget|chat widget|chat detected|чат-виджет|widget marker", " ".join(str(item.get(field) or "") for field in ("fact", "snippet", "detection_reason")), re.I)
+            and item.get("evidence_id")
+        ]
+        state["chat_widget"] = {
+            "status": "CONFIRMED", "reason": "The website audit found a chat widget marker; this does not establish AI capability.",
+            "evidence_ids": chat_evidence_ids, "confidence": "HIGH" if chat_evidence_ids else "LOW",
+        }
+        ai_claim = state.get("ai_assistant")
+        if not isinstance(ai_claim, dict) or str(ai_claim.get("status", "UNKNOWN")).upper() == "NOT_DETECTED":
+            state["ai_assistant"] = {
+                "status": "UNKNOWN", "reason": "A chat widget is confirmed, but the available evidence does not show whether it is AI-powered.",
+                "evidence_ids": chat_evidence_ids, "confidence": "LOW",
+            }
     allowed_statuses = {"CONFIRMED", "INFERRED", "UNKNOWN", "NOT_DETECTED"}
     for key, claim in list(state.items()):
         if not isinstance(claim, dict):

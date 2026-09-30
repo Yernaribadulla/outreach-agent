@@ -7,6 +7,7 @@
   const state = {
     view: 'overview', clinics: [], queue: [], settings: {}, dashboard: {},
     activity: [], verticals: [], detail: null, discovery: null, analysisBusy: new Set(),
+    batch: null, send: null, batchAvailable: 0, sendPreview: null,
   };
   const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
@@ -40,19 +41,22 @@
   const qualificationBadge = (value) => statusBadge(value || 'NEEDS_REVIEW');
 
   async function load() {
-    const [dashboard, clinics, queue, activity, settings, verticals, health] = await Promise.all([
+    const [dashboard, clinics, queue, activity, settings, verticals, health, batch, send, eligible] = await Promise.all([
       get('/api/dashboard'), get('/api/clinics'), get('/api/queue'), get('/api/activity'),
       get('/api/settings'), get('/api/verticals'), get('/api/health'),
+      get('/api/batches/latest'), get('/api/send-batches/latest'), get('/api/batches/eligible?vertical=dental'),
     ]);
     Object.assign(state, {
       dashboard, clinics: clinics.items || [], queue: queue.items || [],
       activity: activity.items || [], settings, verticals: verticals.items || [],
+      batch: batch.job, send: send.job, batchAvailable: eligible.available || 0,
     });
     topStatus.textContent = health.lm_studio
       ? `Локальная AI-модель · ${settings.lm_studio_model}`
       : 'LM Studio недоступен';
     document.getElementById('sidebar-provider').textContent = health.lm_studio
       ? `LM Studio · ${settings.lm_studio_model}` : 'LM Studio недоступен';
+    document.getElementById('sidebar-send').textContent = settings.smtp_configured ? 'Real SMTP configured' : 'SMTP disabled';
   }
 
   function nav(view) {
@@ -65,6 +69,162 @@
 
   function metric(label, value, hint = '') {
     return `<article><span>${esc(label)}</span><strong>${Number(value || 0)}</strong>${hint ? `<small>${esc(hint)}</small>` : ''}</article>`;
+  }
+
+  let jobPollTimer = null;
+  const elapsed = (started, finished) => {
+    if (!started) return '—';
+    const seconds = Math.max(0, Math.floor(((Date.parse(finished || new Date().toISOString()) || Date.now()) - Date.parse(started)) / 1000));
+    return `${Math.floor(seconds / 60)}m ${String(seconds % 60).padStart(2, '0')}s`;
+  };
+  const verticalOptions = (selected = 'dental') => state.verticals.map((item) => `<option value="${esc(item.key)}" ${item.key === selected ? 'selected' : ''}>${esc(item.label)}</option>`).join('');
+
+  function batchStatus(job) {
+    if (!job) return '<p class="muted">Batch ещё не запускался.</p>';
+    const items = (job.items || []).map((item) => `<li>${statusBadge(item.status)} <b>${esc(item.company_name)}</b> · ${esc(item.stage || item.status)}${item.error ? `<small class="error-copy">${esc(item.error)}</small>` : ''}</li>`).join('');
+    const running = job.status === 'RUNNING';
+    const interrupted = job.status === 'INTERRUPTED';
+    return `<div class="job-summary"><b>${esc(job.status)}</b><span>${Number(job.processed_count || 0)} / ${Number(job.queued_count || 0)} processed</span>
+      <span>Requested ${Number(job.requested_count || 0)} · Analyzed ${Number(job.analyzed_count || 0)} · Qualified ${Number(job.qualified_count || 0)}</span>
+      <span>Letters ${Number(job.letters_generated || 0)} · Needs review ${Number(job.needs_review || 0)} · Failed ${Number(job.failed || 0)}</span>
+      ${running ? `<span>Current: ${esc(job.current_company || '—')} · ${esc(job.current_stage || 'Preparing')}</span><span>Elapsed: ${elapsed(job.started_at, null)}</span>` : `<span>Finished: ${esc(job.finished_at || '—')}</span>`}
+      ${interrupted ? `<p class="error-copy">Batch прерван. Обработанные клиники сохраняются; повторный запуск продолжит только незавершённые.</p><button class="button secondary" data-action="batch-resume" data-id="${esc(job.batch_id)}">Продолжить batch</button>` : ''}
+      <details><summary>Состояние клиник (${(job.items || []).length})</summary><ul class="job-items">${items || '<li>Очередь пуста.</li>'}</ul></details></div>`;
+  }
+
+  function sendStatus(job) {
+    if (!job) return '<p class="muted">Send batch ещё не запускался.</p>';
+    const items = (job.items || []).map((item) => `<li>${statusBadge(item.status)} <b>${esc(item.company_name)}</b> · ${esc(item.recipient)}${item.reason ? `<small>${esc(item.reason)}</small>` : ''}</li>`).join('');
+    const canResume = job.status === 'SEND_INTERRUPTED';
+    return `<div class="job-summary"><b>${esc(job.status)}</b><span>Planned ${Number(job.planned_count || 0)} · Sent ${Number(job.sent_count || 0)} · Simulated ${Number(job.simulated_count || 0)} · Failed ${Number(job.failed_count || 0)} · Skipped ${Number(job.skipped_count || 0)}</span>
+      ${job.status === 'RUNNING' ? `<span>Current: ${esc(job.current_company || '—')} · ${esc(job.current_stage || 'Preparing')}</span><span>Elapsed: ${elapsed(job.started_at, null)}</span>` : ''}
+      ${canResume ? `<p class="error-copy">Отправка прервалась. Неопределённый текущий email не повторяется; будут продолжены только оставшиеся PENDING.</p><button class="button secondary" data-action="send-resume-preview" data-id="${esc(job.send_id)}">Продолжить отправку</button>` : ''}
+      <details><summary>Состояние писем (${(job.items || []).length})</summary><ul class="job-items">${items || '<li>Нет писем в плане.</li>'}</ul></details></div>`;
+  }
+
+  function updateWorkflowPanels() {
+    const batchNode = document.getElementById('batch-panel');
+    const sendNode = document.getElementById('send-panel');
+    if (batchNode) batchNode.innerHTML = `<span class="kicker">NIGHTLY RUN</span><h2>Анализ + генерация писем</h2>
+      <p>Batch обрабатывает уже найденные компании и сохраняет прогресс в SQLite. Для новых компаний сначала используйте Discovery.</p>
+      <div class="workflow-form"><label>Vertical<select id="batch-vertical">${verticalOptions()}</select></label>
+      <label>Количество клиник<input id="batch-count" type="number" min="1" max="100" value="20"></label><span class="muted">Сейчас подходит к batch: <b id="batch-available">${Number(state.batchAvailable || 0)}</b></span>
+      <button class="button primary" data-action="batch-start" ${state.batch?.status === 'RUNNING' ? 'disabled' : ''}>Запустить анализ + генерацию</button></div>
+      <div class="job-monitor">${batchStatus(state.batch)}</div>`;
+    if (sendNode) sendNode.innerHTML = `<span class="kicker">EXPLICIT SEND · SEQUENTIAL</span><h2>Отправка писем</h2>
+      <p>Только APPROVED письма с публичным контактом. До подтверждения ни одно письмо не отправляется.</p>
+      <p class="ready-count"><b>${Number(state.dashboard.ready_to_send || 0)}</b> писем готовы к отправке</p>
+      <div class="workflow-form send-form"><label>Vertical<select id="send-vertical">${verticalOptions()}</select></label>
+      <label>Количество<input id="send-count" type="number" min="1" max="500" value="${Math.max(1, Math.min(10, Number(state.dashboard.ready_to_send || 0)))}"></label>
+      <label>Режим<select id="send-mode"><option value="REAL_SMTP" ${state.settings.smtp_configured ? '' : 'disabled'}>Real SMTP${state.settings.smtp_configured ? '' : ' · unavailable'}</option><option value="SIMULATED_SEND" ${state.settings.smtp_configured ? '' : 'selected'}>SIMULATED_SEND · no email</option></select></label>
+      <label>Min interval, sec<input id="send-min-delay" type="number" min="0" max="86400" value="${state.settings.smtp_configured ? 45 : 0}"></label>
+      <label>Max interval, sec<input id="send-max-delay" type="number" min="0" max="86400" value="${state.settings.smtp_configured ? 120 : 0}"></label>
+      <button class="button primary" data-action="send-preview" ${Number(state.dashboard.ready_to_send || 0) < 1 || state.send?.status === 'RUNNING' || state.send?.status === 'SEND_INTERRUPTED' ? 'disabled' : ''}>${state.settings.smtp_configured ? 'ОТПРАВИТЬ ПИСЬМА' : 'Запустить симуляцию'}</button></div>
+      <small class="muted">Max/batch ${Number(state.settings.max_sends_per_batch || 50)} · daily provider limit ${Number(state.settings.daily_send_limit || 50)} · real SMTP ${state.settings.smtp_enabled ? 'enabled' : 'disabled'}</small>
+      <div class="job-monitor">${sendStatus(state.send)}</div>`;
+    batchNode?.querySelector('#batch-vertical')?.addEventListener('change', async (event) => {
+      try { const result = await get(`/api/batches/eligible?vertical=${encodeURIComponent(event.target.value)}`); state.batchAvailable = result.available || 0; batchNode.querySelector('#batch-available').textContent = String(state.batchAvailable); }
+      catch (error) { toast(error.message); }
+    });
+    sendNode?.querySelector('#send-vertical')?.addEventListener('change', async (event) => {
+      try { const result = await get(`/api/send-batches/ready?vertical=${encodeURIComponent(event.target.value)}`); sendNode.querySelector('.ready-count b').textContent = String(result.count || 0); }
+      catch (error) { toast(error.message); }
+    });
+  }
+
+  async function pollJobs() {
+    try {
+      const [batch, send] = await Promise.all([get('/api/batches/latest'), get('/api/send-batches/latest')]);
+      const previousBatch = state.batch;
+      const previousSend = state.send;
+      const wasRunning = state.batch?.status === 'RUNNING' || state.send?.status === 'RUNNING';
+      state.batch = batch.job; state.send = send.job;
+      updateWorkflowPanels();
+      if (state.view === 'activity') {
+        const activityData = await get('/api/activity'); state.activity = activityData.items || []; activity();
+      }
+      const batchFinished = state.batch && previousBatch?.batch_id === state.batch.batch_id && previousBatch.status !== state.batch.status && state.batch.status !== 'RUNNING';
+      const sendFinished = state.send && previousSend?.send_id === state.send.send_id && previousSend.status !== state.send.status && state.send.status !== 'RUNNING';
+      if ((wasRunning || batchFinished || sendFinished) && state.batch?.status !== 'RUNNING' && state.send?.status !== 'RUNNING') await refreshAfterJob();
+      if (state.batch?.status !== 'RUNNING' && state.send?.status !== 'RUNNING' && jobPollTimer) {
+        clearInterval(jobPollTimer); jobPollTimer = null;
+      }
+    } catch { /* Current view keeps the last persisted snapshot visible. */ }
+  }
+
+  async function refreshAfterJob() {
+    await load();
+    if (state.view === 'overview') overview();
+    else if (state.view === 'review') queueView();
+    else if (state.view === 'activity') activity();
+  }
+
+  function startJobPolling() {
+    if (jobPollTimer) return;
+    if (state.batch?.status !== 'RUNNING' && state.send?.status !== 'RUNNING') return;
+    jobPollTimer = setInterval(pollJobs, 1500);
+  }
+
+  async function startAnalysisBatch(button) {
+    const vertical = document.getElementById('batch-vertical')?.value || 'dental';
+    const requested_count = Number(document.getElementById('batch-count')?.value || 20);
+    button.disabled = true;
+    button.textContent = 'Ставим клиники в очередь…';
+    try {
+      const result = await post('/api/batches/start', { vertical, requested_count });
+      state.batch = await get(`/api/batches/${encodeURIComponent(result.batch_id)}`).then((payload) => payload.job);
+      toast(`В batch поставлено ${result.queued_count} из ${result.requested_count} клиник`);
+      updateWorkflowPanels(); startJobPolling();
+    } catch (error) { toast(error.message); button.disabled = false; button.textContent = 'Запустить анализ + генерацию'; }
+  }
+
+  function openSendConfirmation(preview, action = 'confirm') {
+    state.sendPreview = { ...preview, action };
+    const simulated = preview.mode === 'SIMULATED_SEND';
+    const modal = document.createElement('div');
+    modal.className = 'modal-backdrop'; modal.id = 'send-confirmation';
+    const countReady = Number(preview.ready_count ?? preview.planned_count ?? 0);
+    const planned = Number(preview.planned_count ?? (preview.items || []).filter((item) => item.status === 'PENDING').length);
+    modal.innerHTML = `<section class="evidence-modal send-confirm-modal" role="dialog" aria-modal="true"><header><h2>${action === 'resume' ? 'Продолжить отправку' : 'Отправка писем'}</h2><button class="icon-button" data-close aria-label="Закрыть">×</button></header>
+      <p>Готово к отправке: <b>${countReady}</b></p><p>Будет ${simulated ? 'симулировано' : 'отправлено'}: <b>${planned}</b></p>
+      <p>Режим: <b>${simulated ? 'SIMULATED_SEND · без email' : 'Real SMTP'}</b><br>Интервал: ${Number(preview.min_delay_seconds || 0)}–${Number(preview.max_delay_seconds || 0)} сек<br>Vertical: ${esc(preview.vertical || '—')}</p>
+      <p>${simulated ? 'Симуляция не связывается с почтовым провайдером.' : 'После запуска письма будут отправляться последовательно с указанным интервалом.'}</p>
+      <footer class="confirm-actions"><button class="button secondary" data-close>Отмена</button><button class="button primary" data-confirm>${action === 'resume' ? 'Подтвердить продолжение' : simulated ? 'Подтвердить симуляцию' : 'Подтвердить отправку'}</button></footer></section>`;
+    document.body.appendChild(modal);
+    modal.querySelectorAll('[data-close]').forEach((node) => node.addEventListener('click', () => modal.remove()));
+    modal.addEventListener('click', (event) => { if (event.target === modal) modal.remove(); });
+    modal.querySelector('[data-confirm]').onclick = async () => {
+      const confirmButton = modal.querySelector('[data-confirm]'); confirmButton.disabled = true;
+      try {
+        const endpoint = `/api/send-batches/${encodeURIComponent(preview.send_id)}/${action === 'resume' ? 'resume' : 'confirm'}`;
+        await post(endpoint, {});
+        modal.remove(); state.send = await get(`/api/send-batches/${encodeURIComponent(preview.send_id)}`).then((payload) => payload.job);
+        updateWorkflowPanels(); startJobPolling();
+        if (state.send?.status !== 'RUNNING') await refreshAfterJob();
+        toast(simulated ? 'SIMULATED_SEND запущен · email не отправляются' : 'Send batch запущен после подтверждения');
+      } catch (error) { confirmButton.disabled = false; toast(error.message); }
+    };
+  }
+
+  async function startSendPreview(button) {
+    button.disabled = true;
+    const body = {
+      vertical: document.getElementById('send-vertical')?.value || 'dental',
+      count: Number(document.getElementById('send-count')?.value || 1),
+      mode: document.getElementById('send-mode')?.value || 'SIMULATED_SEND',
+      min_delay_seconds: Number(document.getElementById('send-min-delay')?.value || 0),
+      max_delay_seconds: Number(document.getElementById('send-max-delay')?.value || 0),
+    };
+    try {
+      const preview = await post('/api/send-batches/preview', body);
+      state.send = await get(`/api/send-batches/${encodeURIComponent(preview.send_id)}`).then((payload) => payload.job);
+      openSendConfirmation(preview); updateWorkflowPanels();
+    } catch (error) { toast(error.message); button.disabled = false; }
+  }
+
+  async function resumeSendPreview(sendId) {
+    const job = await get(`/api/send-batches/${encodeURIComponent(sendId)}`).then((payload) => payload.job);
+    openSendConfirmation(job, 'resume');
   }
 
   function leadCard(lead) {
@@ -87,12 +247,15 @@
     const data = state.dashboard;
     app.innerHTML = `<section class="hero"><div><span class="kicker">COMMAND CENTER</span><h2>Sales intelligence workspace</h2>
       <p>Публичные источники, evidence-bound анализ и подготовка материалов для ручной проверки.</p></div>
-      <div class="ai-card"><b>${state.settings.smtp_enabled ? 'SMTP disabled in this build' : 'Sending disabled'}</b>
-        <span>${esc(state.settings.lm_studio_model || 'Local model not configured')}</span><small>Real sends: 0</small></div></section>
-      <section class="pipeline">${['DISCOVERED', 'RESEARCHED', 'ANALYZED', 'QUALIFIED', 'DRAFTED', 'REVIEW', 'APPROVED', 'READY_TO_SEND', 'SENT'].map((stage) => `<span class="pipeline-step">${esc(stage)}</span>`).join('')}</section>
-      <section class="metrics">${metric('Total leads', data.clinics)}${metric('Researched', data.researched)}${metric('Qualified', data.qualified)}${metric('Needs review', data.needs_review)}${metric('Drafts', data.drafted)}${metric('Ready to review', data.ready_to_review)}</section>
+      <div class="ai-card"><b>${state.settings.smtp_configured ? 'Real SMTP enabled and configured' : state.settings.smtp_enabled ? 'SMTP configuration incomplete' : 'Real SMTP disabled'}</b>
+        <span>${esc(state.settings.lm_studio_model || 'Local model not configured')}</span><small>Real sends: ${Number(state.settings.real_sends || 0)} · Approve never sends · each batch needs confirmation</small></div></section>
+      <section class="pipeline">${['DISCOVERED', 'ANALYZING', 'ANALYZED', 'QUALIFIED', 'NEEDS_REVIEW', 'LETTER_DONE', 'READY_TO_SEND', 'SENDING', 'SENT', 'SEND_FAILED'].map((stage) => `<span class="pipeline-step">${esc(stage)}</span>`).join('')}</section>
+      <section class="metrics">${metric('Discovered', data.clinics)}${metric('Analyzed', data.analyzed)}${metric('Qualified', data.qualified)}${metric('Needs review', data.needs_review)}${metric('Letter done', data.letters_done)}${metric('Ready to send', data.ready_to_send)}${metric('Sent', data.sent)}${metric('Failed', data.failed)}</section>
+      <section class="workflow-grid"><article id="batch-panel" class="surface"></article><article id="send-panel" class="surface"></article></section>
       <section class="section-heading"><div><span class="kicker">RECENT LEADS</span><h2>Latest research</h2></div><button class="button secondary" data-view="leads">Все leads</button></section>
       <div class="lead-grid">${state.clinics.slice(0, 6).map(leadCard).join('') || '<div class="empty-state">Пока нет найденных компаний.</div>'}</div>`;
+    updateWorkflowPanels();
+    startJobPolling();
   }
 
   function leads() {
@@ -124,10 +287,19 @@
   }
 
   function queueView() {
-    app.innerHTML = `<section class="section-heading"><div><span class="kicker">HUMAN REVIEW</span><h2>Review Queue</h2></div></section>
-      <div class="review-list">${state.queue.map((draft) => `<article class="review-row"><div>${statusBadge(draft.status)}<h3>${esc(draft.clinic_name || 'Company')}</h3><p class="muted">${esc(draft.email || 'Публичный email не найден')} · ${esc(draft.subject || '')}</p></div>
-      ${qualificationBadge(state.clinics.find((lead) => String(lead.id) === String(draft.clinic_id))?.qualification_status)}
-      <button class="button secondary" data-action="email" data-id="${draft.id}">Открыть письмо</button></article>`).join('') || '<div class="empty-state">Нет сохранённых draft для ручной проверки.</div>'}</div>`;
+    const letterDone = state.queue.filter((draft) => draft.workflow_status === 'LETTER_DONE');
+    const ready = state.queue.filter((draft) => draft.workflow_status === 'READY_TO_SEND');
+    const approvedBlocked = state.queue.filter((draft) => draft.status === 'APPROVED' && draft.workflow_status !== 'READY_TO_SEND');
+    const card = (draft) => `<article class="review-row"><div>${statusBadge(draft.workflow_status)}<h3>${esc(draft.clinic_name || 'Company')}</h3>
+      <p class="muted">${esc(draft.analysis?.company_summary || draft.analysis?.sales_brief || 'Analysis unavailable')}</p>
+      <p class="muted">${esc(draft.email || 'Публичный email не найден')} · ${esc(draft.subject || '')}</p>
+      <small>Qualification: ${esc(draft.qualification?.status || 'UNKNOWN')} · Angle: ${esc(draft.analysis?.recommended_angle || 'Not recorded')}</small>
+      <small>Evidence: ${esc((draft.source_observations || []).join(' · ') || 'No supporting evidence available.')}</small></div>
+      <button class="button secondary" data-action="email" data-id="${draft.id}">Открыть письмо</button></article>`;
+    app.innerHTML = `<section class="section-heading"><div><span class="kicker">HUMAN REVIEW</span><h2>Review Queue</h2><p>Approve сохраняет решение, но не отправляет email.</p></div></section>
+      <h3>LETTER DONE · ${letterDone.length}</h3><div class="review-list">${letterDone.map(card).join('') || '<p class="muted">Нет писем, ожидающих проверки.</p>'}</div>
+      <h3>READY TO SEND · ${ready.length}</h3><div class="review-list">${ready.map(card).join('') || '<p class="muted">Пока нет писем, прошедших send checks и approval.</p>'}</div>
+      ${approvedBlocked.length ? `<h3>APPROVED · SAFETY CHECK REQUIRED · ${approvedBlocked.length}</h3><div class="review-list">${approvedBlocked.map(card).join('')}</div>` : ''}`;
   }
 
   function activity() {
@@ -143,11 +315,11 @@
     const settingsData = state.settings;
     app.innerHTML = `<section class="section-heading"><div><span class="kicker">CONFIGURATION</span><h2>Settings</h2></div></section>
       <div class="settings-grid"><article class="surface"><span class="kicker">LOCAL AI</span><h3>${esc(settingsData.lm_studio_model || 'Not configured')}</h3><p>${esc(settingsData.lm_studio_url || '')}</p><p>AI provider: LM Studio on the local machine.</p></article>
-      <article class="surface"><span class="kicker">EMAIL SAFETY</span><h3>SMTP disabled</h3><p>Provider: simulated only<br>Real sends: 0</p><p>Draft approval never sends an email.</p></article>
+      <article class="surface"><span class="kicker">EMAIL SAFETY</span><h3>${settingsData.smtp_configured ? 'Real SMTP configured' : settingsData.smtp_enabled ? 'SMTP configuration incomplete' : 'SMTP disabled'}</h3><p>Provider: ${settingsData.smtp_configured ? 'SMTP' : 'SIMULATED_SEND only'}<br>Real sends recorded: ${Number(settingsData.real_sends || 0)}</p><p>Approval never sends an email. Real sending requires a count-limited preview and explicit confirmation.</p><p>Max/batch ${Number(settingsData.max_sends_per_batch || 50)} · Daily limit ${Number(settingsData.daily_send_limit || 50)} · Min delay ${Number(settingsData.min_send_delay_seconds || 30)} sec</p></article>
       <article class="surface"><span class="kicker">VERTICALS</span><h3>${state.verticals.map((item) => esc(item.label)).join(', ')}</h3><p>Discovery keywords and message config are loaded from backend vertical settings.</p></article></div>`;
   }
 
-  const signalNames = { website: 'Website', mobile: 'Mobile', online_booking: 'Booking', whatsapp: 'WhatsApp', crm: 'CRM', ai_assistant: 'AI Assistant', online_payment: 'Payment', automation: 'Automation' };
+  const signalNames = { website: 'Website', mobile: 'Mobile', online_booking: 'Booking', whatsapp: 'WhatsApp', chat_widget: 'Chat widget', crm: 'CRM', ai_assistant: 'AI Assistant', online_payment: 'Payment', automation: 'Automation' };
   const statusText = { CONFIRMED: 'Confirmed', INFERRED: 'Inferred', UNKNOWN: 'Unknown', NOT_DETECTED: 'Not detected' };
 
   function evidenceModal(title, evidence, fallback) {
@@ -189,14 +361,16 @@
       const contactRows = (detail.contacts || []).map((contact) => `<li>${esc(contact.email)} · ${esc(contact.contact_type || contact.kind || 'PUBLIC_BUSINESS_EMAIL')} · ${esc(contact.confidence || 'unknown')} · <a href="${esc(contact.source_url || '#')}" target="_blank" rel="noreferrer">source</a></li>`).join('');
       const evidenceRows = evidence.map((item) => `<li><b>${esc(item.fact || 'Evidence')}</b> — ${esc(item.status || 'UNKNOWN')} · <a href="${esc(item.source || '#')}" target="_blank" rel="noreferrer">${esc(item.source || 'Source unavailable')}</a></li>`).join('');
       const draft = detail.draft;
+      const draftStatus = draft ? (detail.workflow_status || (draft.status === 'DRAFTED' ? 'LETTER DONE' : draft.status)) : '';
+      const history = detail.analysis_history || [];
       app.innerHTML = `<button class="button secondary" data-view="leads">← Leads</button><section class="detail-header"><span class="badge real">${esc(clinic.status)}</span>
         <h2>${esc(clinic.name)}</h2><p>${esc(clinic.city || 'Город не указан')} · ${esc(clinic.website || 'Website unavailable')}</p><p>Vertical: ${esc(clinic.category || 'unknown')} · Source: ${esc(clinic.source_url || 'unknown')}</p>
-        <button class="button primary" data-action="analyze" data-id="${clinic.id}" ${state.analysisBusy.has(String(clinic.id)) ? 'disabled' : ''}>Анализировать</button>
+        <button class="button primary" data-action="analyze" data-id="${clinic.id}" data-repeat="${analysis ? 'true' : 'false'}" ${state.analysisBusy.has(String(clinic.id)) ? 'disabled' : ''}>${analysis ? 'Повторить анализ' : 'Анализировать'}</button>
         <span id="analysis-state" role="status"></span></section>
         <div class="detail-grid"><article class="surface"><span class="kicker">DIGITAL PRESENCE</span><div class="signal-grid">${signalGrid}</div></article>
         <article class="surface"><span class="kicker">AI ANALYSIS</span>${analysis ? `<h3>${esc(formatAIValue(analysis.company_summary || analysis.sales_brief) || 'Analysis completed')}</h3>
-          <p>Priority: ${esc(analysis.priority?.score ?? 'Unknown')}</p><p>Recommended angle: ${esc(analysis.recommended_angle || 'Unknown')}</p>
-          <button class="button secondary" data-action="why-summary">Why?</button>` : '<p>AI analysis ещё не запускался.</p>'}</article>
+          <p>Analysis completed · ${esc(analysis.created_at || 'timestamp unavailable')} · ${history.length} run(s)</p><p>Priority: ${esc(analysis.priority?.score ?? 'Unknown')}</p><p>Recommended angle: ${esc(analysis.recommended_angle || 'Unknown')}</p>
+          <button class="button secondary" data-action="why-summary">Why?</button>${history.length > 1 ? `<details><summary>История анализов</summary><ul>${history.map((run) => `<li>${esc(run.created_at)} · ${esc(run.recommended_angle || 'Angle unavailable')}</li>`).join('')}</ul></details>` : ''}` : '<p>AI analysis ещё не запускался.</p>'}</article>
         <article class="surface qualification-panel"><span class="kicker">QUALIFICATION</span>${qualificationPanel(qualification)}</article>
         <article class="surface"><span class="kicker">PUBLIC CONTACTS</span><ul class="contact-list">${contactRows || '<li>Публичный контакт с provenance не найден.</li>'}</ul>
           ${(profile.conflicts || []).length ? `<button class="button secondary" data-action="why-conflicts">Contact conflicts · ${(profile.conflicts || []).length}</button>` : ''}</article>
@@ -204,8 +378,9 @@
           <p>NOT_DETECTED не трактуется как ABSENT.</p></article>
         <article class="surface"><span class="kicker">WEBSITE AUDIT</span><h3>${esc(profile.website_status || profile.website_audit?.website_status || 'UNKNOWN')}</h3>
           <p>${esc(profile.website_audit?.title || 'Название страницы не сохранено')}</p><p>${esc(profile.website_audit?.url || clinic.website || 'URL неизвестен')}</p></article></div>
-        ${draft ? `<section class="surface email-inline"><span class="kicker">SAVED DRAFT · ${esc(draft.status)}</span><h3>${esc(draft.subject)}</h3><p>Plain text сохраняется в SQLite. Отправка отключена.</p>
-          <pre>${esc(draft.plain_text_body || draft.body || '')}</pre><button class="button secondary" data-action="email-detail">Открыть письмо</button></section>` : ''}`;
+        ${draft ? `<section class="surface email-inline"><span class="kicker">${esc(draftStatus)}</span><h3>${esc(draft.subject)}</h3><p>Письмо сохранено в SQLite · ${esc(draft.created_at || '')}</p>
+          <pre>${esc(draft.plain_text_body || draft.body || '')}</pre><button class="button secondary" data-action="email-detail">Открыть письмо</button>
+          <button class="button secondary" data-action="draft-regenerate" data-id="${clinic.id}">Повторно сгенерировать</button></section>` : ''}`;
       if (outcome) {
         const statusNode = document.getElementById('analysis-state');
         if (statusNode) statusNode.innerHTML = `<b class="success-copy">Анализ завершён · ${esc(outcome.elapsed)} сек</b><p>Qualification · ${esc(outcome.status)}${analysis?.recommended_angle ? ` · ${esc(analysis.recommended_angle)}` : ''}</p>`;
@@ -218,9 +393,10 @@
     }
   }
 
-  async function analyzeLead(id, button) {
+  async function analyzeLead(id, button, repeat = false) {
     const key = String(id);
     if (state.analysisBusy.has(key)) return;
+    if (repeat && !window.confirm('Повторить анализ этой клиники? Старый анализ останется в истории.')) return;
     state.analysisBusy.add(key);
     const started = performance.now();
     const message = document.getElementById('analysis-state');
@@ -233,7 +409,7 @@
     updateTimer();
     const timer = setInterval(updateTimer, 500);
     try {
-      const result = await post(`/api/clinics/${id}/analyze`, {});
+      const result = await post(`/api/clinics/${id}/analyze`, { repeat });
       clearInterval(timer);
       const elapsed = ((performance.now() - started) / 1000).toFixed(1);
       await load();
@@ -251,20 +427,22 @@
       if (activeButton) {
         activeButton.disabled = false;
         activeButton.removeAttribute('aria-busy');
-        if (activeButton.textContent.startsWith('Анализируется')) activeButton.textContent = 'Анализировать';
+        if (activeButton.textContent.startsWith('Анализируется')) activeButton.textContent = repeat ? 'Повторить анализ' : 'Анализировать';
       }
     }
   }
 
   function openEmail(draft, email) {
     if (!draft) return;
+    const evidenceRows = (draft.evidence || []).map((item) => `<li><b>${esc(item.fact || 'Evidence')}</b> · ${esc(item.status || 'UNKNOWN')} · ${item.source || item.source_url ? `<a href="${esc(item.source || item.source_url)}" target="_blank" rel="noreferrer">Source</a>` : 'Source unavailable'}</li>`).join('');
+    const analysis = draft.analysis || {};
     const modal = document.createElement('div');
     modal.className = 'modal-backdrop';
     modal.innerHTML = `<section class="email-review"><header><div><span class="kicker">PERSONALIZED OUTREACH</span><h2>Email Review</h2></div><button class="icon-button" data-close aria-label="Закрыть">×</button></header>
       <div class="email-meta"><div><span>TO</span><b>${esc(email || draft.email || 'Публичный email не найден')}</b></div><div><span>SUBJECT</span><b>${esc(draft.subject || '')}</b></div><div><span>STATUS</span><b>${esc(draft.status || '')}</b></div></div>
       <div class="review-tabs"><button class="active" data-tab="plain">Plain text</button><button data-tab="html">HTML preview</button></div>
       <div class="email-content" id="email-content"><pre>${esc(draft.plain_text_body || draft.body || '')}</pre></div>
-      <aside class="why-email"><h3>Rationale and evidence</h3><p>${esc(draft.rationale || 'Rationale is not available.')}</p><p>${esc((draft.source_observations || []).join(' · '))}</p></aside>
+      <aside class="why-email"><h3>Rationale and evidence</h3><p>${esc(draft.rationale || 'Rationale is not available.')}</p><p>Recommended angle: ${esc(analysis.recommended_angle || 'Not recorded')}</p><p>${esc((draft.source_observations || []).join(' · ') || 'No supporting evidence available.')}</p><ul>${evidenceRows || '<li>No supporting evidence available.</li>'}</ul></aside>
       <footer><button class="button secondary" data-approve ${draft.status === 'SENT' || draft.status === 'APPROVED' ? 'disabled' : ''}>${draft.status === 'APPROVED' ? '✓ Approved' : 'Approve for review'}</button>
       <button class="button primary" disabled>Отправка отключена</button><small>SMTP disabled · real sends: 0</small></footer></section>`;
     document.body.appendChild(modal);
@@ -356,7 +534,11 @@
     }
   }
 
-  function showActivity() { activity(); }
+  async function showActivity() {
+    const result = await get('/api/activity');
+    state.activity = result.items || [];
+    activity();
+  }
 
   async function render(view) {
     nav(view);
@@ -365,7 +547,7 @@
       if (view === 'overview') overview();
       else if (view === 'leads') leads();
       else if (view === 'review') queueView();
-      else if (view === 'activity') showActivity();
+      else if (view === 'activity') await showActivity();
       else if (view === 'settings') settings();
       else if (view === 'discovery') await discoveryView();
     } catch (error) { app.innerHTML = `<div class="empty-state">${esc(error.message)}</div>`; }
@@ -378,14 +560,30 @@
     if (!action) return;
     if (action.dataset.action === 'detail') { await showDetail(action.dataset.id); return; }
     if (action.dataset.action === 'discover') { await startDiscovery(action); return; }
-    if (action.dataset.action === 'analyze') { await analyzeLead(action.dataset.id, action); return; }
+    if (action.dataset.action === 'analyze') { await analyzeLead(action.dataset.id, action, action.dataset.repeat === 'true'); return; }
+    if (action.dataset.action === 'batch-start') { await startAnalysisBatch(action); return; }
+    if (action.dataset.action === 'batch-resume') {
+      action.disabled = true;
+      try { await post(`/api/batches/${encodeURIComponent(action.dataset.id)}/resume`, {}); state.batch = await get(`/api/batches/${encodeURIComponent(action.dataset.id)}`).then((payload) => payload.job); updateWorkflowPanels(); startJobPolling(); }
+      catch (error) { action.disabled = false; toast(error.message); }
+      return;
+    }
+    if (action.dataset.action === 'send-preview') { await startSendPreview(action); return; }
+    if (action.dataset.action === 'send-resume-preview') { try { await resumeSendPreview(action.dataset.id); } catch (error) { toast(error.message); } return; }
+    if (action.dataset.action === 'draft-regenerate') {
+      if (!window.confirm('Повторно сгенерировать письмо? Текущий draft останется в истории как superseded.')) return;
+      action.disabled = true;
+      try { await post(`/api/clinics/${encodeURIComponent(action.dataset.id)}/draft/regenerate`, {}); await load(); await showDetail(action.dataset.id); toast('Новое письмо сохранено как LETTER DONE'); }
+      catch (error) { action.disabled = false; toast(error.message); }
+      return;
+    }
     if (action.dataset.action === 'email') {
       const draft = state.queue.find((item) => String(item.id) === String(action.dataset.id));
       openEmail(draft, draft?.email); return;
     }
     if (action.dataset.action === 'email-detail') {
       const draft = state.detail?.draft;
-      openEmail(draft, state.detail?.contacts?.find((item) => item.email)?.email); return;
+      openEmail(draft ? { ...draft, evidence: state.detail.evidence, analysis: state.detail.analysis } : null, state.detail?.contacts?.find((item) => item.email)?.email); return;
     }
     if (action.dataset.action === 'why') {
       const claim = state.detailAnalysis?.digital_state?.[action.dataset.key] || {};

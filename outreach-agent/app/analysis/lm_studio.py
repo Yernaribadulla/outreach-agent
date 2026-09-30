@@ -91,8 +91,9 @@ class LMStudioClient:
     def chat_opportunity(self, payload: dict) -> dict:
         prompt = ("Только JSON. Ты анализируешь B2B lead по переданным evidence. Никогда не выдумывай факты, владельцев, технологии или отсутствие функций. "
                   "Разделяй CONFIRMED, INFERRED, UNKNOWN и NOT_DETECTED. В evidence_ids используй только точные evidence_id из входных данных; указывай только evidence, которое напрямую поддерживает claim. "
+                  "Различай chat_widget, обычный chatbot и ai_assistant: наличие чата не доказывает использование AI; если виджет есть, а AI не подтверждён — ai_assistant должен быть UNKNOWN с объяснением. "
                   "Не считай HTTP-доступность подтверждением booking, CRM или AI. Верни ключи: company_summary, digital_state, priority, why_this_lead, recommended_angle, sales_brief. "
-                  "digital_state должен содержать website,mobile,online_booking,crm,ai_assistant,online_payment,automation; каждый объект: status, reason, evidence_ids, confidence. priority: score и website_opportunity,booking_opportunity,crm_opportunity,ai_opportunity,automation_opportunity. ")
+                  "digital_state должен содержать website,mobile,online_booking,crm,chat_widget,ai_assistant,online_payment,automation; каждый объект: status, reason, evidence_ids, confidence. priority: score и website_opportunity,booking_opportunity,crm_opportunity,ai_opportunity,automation_opportunity. ")
         body = {"model": self.model, "temperature": 0.0, "max_tokens": 900, "messages": [{"role": "user", "content": prompt + "\nEVIDENCE:\n" + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))}]}
         print(f"[LM] stage=opportunity company={payload.get('company', {}).get('name', 'unknown')} model={self.model} payload_chars={len(json.dumps(payload, ensure_ascii=False))} timeout={READ_TIMEOUT_SECONDS}s evidence_count={len(payload.get('evidence', []))}", flush=True)
         data = self._request(body)

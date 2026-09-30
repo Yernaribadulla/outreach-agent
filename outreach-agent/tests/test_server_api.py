@@ -59,6 +59,24 @@ class DashboardApiTests(unittest.TestCase):
         connection.close()
         return response.status, result
 
+    def approved_draft(self, name="Send fixture", email="clinic@example.test"):
+        clinic = server.DB.add_clinic({"name": name, "city": "Test", "category": "dental", "profile": {"vertical": "dental"}})
+        contact = server.DB.add_contact(clinic, email, "https://example.test/contact")
+        draft = server.DB.add_draft(clinic, contact, {"subject": f"For {name}", "body": "Local test", "rationale": "Fixture", "source_observations": ["Fixture evidence"], "confidence": 1.0})
+        server.DB.update_draft(draft, status="APPROVED")
+        server.DB.update_clinic_status(clinic, "READY_TO_SEND")
+        return clinic, contact, draft
+
+    def wait_for_job(self, route, job_id, terminal, timeout=4):
+        result = None
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            _, payload = self.request("GET", f"{route}/{job_id}")
+            result = payload["job"]
+            if result["status"] in terminal: return result
+            time.sleep(.025)
+        self.fail(f"Job did not reach {terminal}; last state: {result}")
+
     def test_dashboard_counts_needs_review_qualification(self):
         server.DB.add_clinic({
             "name": "Dashboard Qualification Fixture",
@@ -152,8 +170,209 @@ class DashboardApiTests(unittest.TestCase):
         server.DB.update_draft(draft, status="APPROVED")
         status, result = self.request("POST", "/api/send", {"id": draft, "simulate": False})
         self.assertEqual(status, 403)
-        self.assertIn("SMTP отключён", result["error"])
+        self.assertIn("явное подтверждение", result["error"])
         self.assertEqual(server.DB.list_send_logs(), [])
+
+    def test_database_startup_preserves_sent_status_and_timestamp(self):
+        clinic, contact, draft = self.approved_draft("Startup SENT fixture", "startup@example.test")
+        server.DB.update_draft(draft, status="SENT")
+        historic_timestamp = "2024-01-02T03:04:05+00:00"
+        server.DB.conn.execute("UPDATE drafts SET updated_at=? WHERE id=?", (historic_timestamp, draft)); server.DB.conn.commit()
+        server.DB.log_send(draft, "startup@example.test", "historical", "SENT")
+        path = server.DB.path
+        server.DB.close(); server.DB = server.Database(path)
+        saved = server.DB.get_draft(draft)
+        self.assertEqual(saved["status"], "SENT")
+        self.assertEqual(saved["updated_at"], historic_timestamp)
+
+    def test_batch_analysis_persists_draft_and_continues_after_one_failure(self):
+        evidence = {"evidence_id": "ev-batch-booking", "status": "CONFIRMED", "fact": "Online booking action link is present", "snippet": "Book an appointment", "source": "https://batch.example/booking", "company_name": "Batch success fixture", "confidence": "HIGH", "observed_at": "2026-09-30T10:00:00+00:00"}
+        profile = {"vertical": "dental", "contacts": [{"email": "desk@batch.example", "source": "https://batch.example/contact", "source_url": "https://batch.example/contact"}], "evidence": [evidence], "website_audit": {"website_status": "WEBSITE_OK", "signals": {"booking": True}, "evidence": [evidence]}}
+        success_id = server.DB.add_clinic({"name": "Batch success fixture", "city": "Test", "category": "dental", "website": "https://batch.example", "profile": profile})
+        server.DB.add_contact(success_id, "desk@batch.example", "https://batch.example/contact")
+        failure_id = server.DB.add_clinic({"name": "Batch failure fixture", "city": "Test", "category": "dental", "profile": {"vertical": "dental"}})
+        analysis = {"company_summary": "Verified booking flow", "confidence": 0.91, "digital_state": {"online_booking": {"status": "CONFIRMED", "reason": "A booking action is present.", "evidence_ids": ["ev-batch-booking"], "confidence": "HIGH"}}, "priority": {"score": 75}, "why_this_lead": ["A public booking action was verified."], "recommended_angle": "Discuss the online booking journey.", "sales_brief": "A verified booking action is present."}
+        fake_client = SimpleNamespace(model="qwen/qwen3-vl-8b", chat_opportunity=lambda payload: analysis)
+        draft = {"subject": "Booking journey", "body": "Evidence-bound note. https://yernaribadulla.github.io/Dentist_rus_commercial/", "rationale": "Based on a verified booking action.", "source_observations": ["ignored model observation"], "confidence": 0.91}
+
+        def analyze(clinic_id, **kwargs):
+            if clinic_id == failure_id: raise RuntimeError("fixture error; continue")
+            return original_analyze(clinic_id, **kwargs)
+
+        original_analyze = server._analyze_clinic
+        with patch("app.server.lm_client", return_value=fake_client), patch("app.server.generate_draft", return_value=draft), patch("app.server._analyze_clinic", side_effect=analyze):
+            status, started = self.request("POST", "/api/batches/start", {"vertical": "dental", "requested_count": 2})
+            self.assertEqual(status, 202)
+            final = self.wait_for_job("/api/batches", started["batch_id"], {"COMPLETED"})
+
+        self.assertEqual(final["requested_count"], 2)
+        self.assertEqual(final["queued_count"], 2)
+        self.assertEqual(final["processed_count"], 2)
+        self.assertEqual(final["failed"], 1)
+        self.assertEqual(final["analyzed_count"], 1)
+        self.assertEqual(final["qualified_count"], 1)
+        self.assertEqual(final["letters_generated"], 1)
+        _, queue = self.request("GET", "/api/queue")
+        saved = next(item for item in queue["items"] if item["clinic_id"] == success_id)
+        self.assertEqual(saved["workflow_status"], "LETTER_DONE")
+        self.assertEqual(saved["analysis"]["recommended_angle"], analysis["recommended_angle"])
+        self.assertEqual(saved["subject"], draft["subject"])
+        self.assertTrue(saved["html_body"])
+        self.assertTrue(saved["rationale"])
+        self.assertTrue(saved["evidence"])
+        self.assertEqual(next(item for item in final["items"] if item["clinic_id"] == failure_id)["status"], "FAILED")
+
+        db_path = server.DB.path
+        server.DB.close(); server.DB = server.Database(db_path)
+        persisted = server.DB.get_batch_job(started["batch_id"])
+        self.assertEqual(persisted["status"], "COMPLETED")
+        self.assertEqual(persisted["letters_generated"], 1)
+        self.assertIsNotNone(server.DB.active_draft(success_id))
+
+    def test_batch_resume_retries_only_pending_items(self):
+        clinics = [server.DB.add_clinic({"name": f"Resume fixture {i}", "city": "Test", "category": "dental", "profile": {"vertical": "dental"}}) for i in range(2)]
+        batch_id = "batch-resume-fixture"
+        server.DB.create_batch_job(batch_id, "dental", 2, [{"id": value, "name": f"Resume fixture {i}"} for i, value in enumerate(clinics)])
+        server.DB.update_batch_item(batch_id, clinics[0], status="COMPLETED", stage="COMPLETED", finished_at="2026-09-30T10:00:00+00:00")
+        server.DB.conn.execute("UPDATE batch_jobs SET status='INTERRUPTED' WHERE batch_id=?", (batch_id,)); server.DB.conn.commit()
+        processed = []
+
+        def cached_analyze(clinic_id, **kwargs):
+            processed.append(clinic_id)
+            return 200, {"qualification": {"status": "NEEDS_REVIEW"}, "draft": None}
+
+        with patch("app.server._analyze_clinic", side_effect=cached_analyze):
+            status, result = self.request("POST", f"/api/batches/{batch_id}/resume", {})
+            self.assertEqual(status, 202)
+            final = self.wait_for_job("/api/batches", batch_id, {"COMPLETED"})
+        self.assertEqual(result["status"], "RUNNING")
+        self.assertEqual(processed, [clinics[1]])
+        self.assertEqual(final["processed_count"], 2)
+
+    def test_repeated_analysis_is_explicit_and_history_is_append_only(self):
+        repeat_profile = {"vertical": "dental", "qualification": {"status": "NEEDS_REVIEW", "reasons": ["fixture"]}, "website_audit": {"website_status": "WEBSITE_OK", "signals": {}}}
+        clinic = server.DB.add_clinic({"name": "Repeat fixture", "city": "Test", "category": "dental", "website": "https://repeat.example", "profile": repeat_profile})
+        old = {"confidence": 0.2, "digital_state": {}, "recommended_angle": "old"}
+        server.DB.add_analysis(clinic, "qwen/qwen3-vl-8b", {}, old)
+        server.DB.update_clinic_status(clinic, "NEEDS_REVIEW", repeat_profile)
+        fresh = {"confidence": 0.2, "digital_state": {}, "recommended_angle": "new"}
+        fake_client = SimpleNamespace(model="qwen/qwen3-vl-8b", chat_opportunity=lambda payload: fresh)
+        with patch("app.server.lm_client", return_value=fake_client):
+            status, cached = self.request("POST", f"/api/clinics/{clinic}/analyze", {"repeat": False})
+            self.assertEqual(status, 200)
+            self.assertEqual(cached["analysis"]["recommended_angle"], "old")
+            self.assertEqual(server.DB.conn.execute("SELECT COUNT(*) FROM analyses WHERE clinic_id=?", (clinic,)).fetchone()[0], 1)
+            status, repeated = self.request("POST", f"/api/clinics/{clinic}/analyze", {"repeat": True})
+        self.assertEqual(status, 200)
+        self.assertEqual(repeated["analysis"]["recommended_angle"], "new")
+        self.assertEqual(server.DB.conn.execute("SELECT COUNT(*) FROM analyses WHERE clinic_id=?", (clinic,)).fetchone()[0], 2)
+
+    def test_send_preview_requires_confirmation_and_simulated_batch_never_uses_smtp(self):
+        self.approved_draft("Explicit sim fixture", "sim@example.test")
+        with patch.object(server.SMTPProvider, "send") as smtp_send:
+            status, preview = self.request("POST", "/api/send-batches/preview", {"vertical": "dental", "count": 10, "mode": "SIMULATED_SEND", "min_delay_seconds": 0, "max_delay_seconds": 0})
+            self.assertEqual(status, 200)
+            self.assertEqual(preview["ready_count"], 1)
+            self.assertEqual(preview["planned_count"], 1)
+            self.assertEqual(server.DB.list_send_logs(), [])
+            status, started = self.request("POST", f"/api/send-batches/{preview['send_id']}/confirm", {})
+            self.assertEqual(status, 202)
+            final = self.wait_for_job("/api/send-batches", started["send_id"], {"COMPLETED"})
+            smtp_send.assert_not_called()
+        self.assertEqual(final["simulated_count"], 1)
+        self.assertEqual(final["sent_count"], 0)
+        self.assertEqual(server.DB.list_send_logs()[0]["status"], "SIMULATED_SENT")
+        self.assertEqual(server.DB.get_draft(final["items"][0]["draft_id"])["status"], "SIMULATED_SENT")
+
+    def test_send_ready_filter_excludes_suppressed_and_nonpublic_contacts(self):
+        good = self.approved_draft("Ready fixture", "ready@example.test")
+        suppressed = self.approved_draft("Suppressed fixture", "stop@example.test")
+        private = self.approved_draft("Private fixture", "private@example.test")
+        server.DB.suppress("stop@example.test", "fixture")
+        server.DB.conn.execute("UPDATE contacts SET is_public=0 WHERE id=?", (private[1],)); server.DB.conn.commit()
+        ready = server.DB.ready_to_send("dental")
+        self.assertEqual([item["id"] for item in ready], [good[2]])
+
+    def test_send_preview_obeys_user_count_batch_cap_and_daily_limit(self):
+        for index in range(3): self.approved_draft(f"Send cap {index}", f"cap{index}@example.test")
+        with patch.dict(os.environ, {"MAX_SENDS_PER_BATCH": "1", "SMTP_DAILY_LIMIT": "2"}, clear=False):
+            status, preview = self.request("POST", "/api/send-batches/preview", {"vertical": "dental", "count": 10, "mode": "SIMULATED_SEND", "min_delay_seconds": 0, "max_delay_seconds": 0})
+        self.assertEqual(status, 200)
+        self.assertEqual(preview["requested_count"], 10)
+        self.assertEqual(preview["max_per_batch"], 1)
+        self.assertEqual(preview["daily_remaining"], 2)
+        self.assertEqual(preview["planned_count"], 1)
+
+    def test_send_delay_is_randomized_within_selected_range(self):
+        self.approved_draft("Delay first", "delay1@example.test")
+        self.approved_draft("Delay second", "delay2@example.test")
+        items = server.DB.ready_to_send()
+        server.DB.create_send_job("send-delay-fixture", "dental", "SIMULATED_SEND", 2, 10, 20, 50, 50, items)
+        server.DB.confirm_send_job("send-delay-fixture")
+        with patch("app.server.random.randint", return_value=17) as randomized, patch("app.server.time.sleep") as sleep:
+            server._send_worker("send-delay-fixture")
+        randomized.assert_called_once_with(10, 20)
+        sleep.assert_called_once_with(17)
+        self.assertEqual(server.DB.get_send_job("send-delay-fixture")["status"], "COMPLETED")
+
+    def test_provider_rejection_stops_batch_and_rate_limit_sets_cooldown(self):
+        self.approved_draft("Provider reject first", "reject1@example.test")
+        self.approved_draft("Provider reject second", "reject2@example.test")
+        items = server.DB.ready_to_send()
+        server.DB.create_send_job("send-reject-fixture", "dental", "REAL_SMTP", 2, 30, 30, 50, 50, items)
+        server.DB.confirm_send_job("send-reject-fixture")
+        env = {"SMTP_ENABLED": "true", "SMTP_HOST": "smtp.example.test", "SMTP_USERNAME": "u", "SMTP_PASSWORD": "p", "SMTP_FROM": "sender@example.test"}
+        rejection = __import__("smtplib").SMTPResponseException(421, b"rate limit exceeded")
+        with patch("app.server.load_env", return_value=env), patch.object(server.SMTPProvider, "check_available"), patch.object(server.SMTPProvider, "send", side_effect=rejection):
+            server._send_worker("send-reject-fixture")
+        job = server.DB.get_send_job("send-reject-fixture")
+        self.assertEqual(job["status"], "STOPPED_PROVIDER_LIMIT")
+        self.assertEqual(job["failed_count"], 1)
+        self.assertEqual(job["items"][0]["status"], "FAILED")
+        self.assertEqual(job["items"][1]["status"], "PENDING")
+        self.assertIsNotNone(server.DB.provider_cooldown())
+
+    def test_real_batch_preview_is_refused_when_smtp_disabled(self):
+        self.approved_draft("Disabled SMTP fixture", "disabled@example.test")
+        with patch("app.server.load_env", return_value={"SMTP_ENABLED": "false"}):
+            status, result = self.request("POST", "/api/send-batches/preview", {"vertical": "dental", "count": 1, "mode": "REAL_SMTP", "min_delay_seconds": 45, "max_delay_seconds": 120})
+        self.assertEqual(status, 403)
+        self.assertIn("SMTP отключён", result["error"])
+        self.assertEqual(server.DB.conn.execute("SELECT COUNT(*) FROM send_logs").fetchone()[0], 0)
+
+    def test_send_lock_blocks_second_batch_and_real_endpoint_is_always_blocked(self):
+        clinic, contact, draft = self.approved_draft("Send lock fixture", "lock@example.test")
+        server.DB.create_send_job("send-lock-fixture", "dental", "SIMULATED_SEND", 1, 0, 0, 50, 50, [dict(server.DB.ready_to_send()[0])])
+        server.DB.confirm_send_job("send-lock-fixture")
+        status, result = self.request("POST", "/api/send-batches/preview", {"vertical": "dental", "count": 1, "mode": "SIMULATED_SEND", "min_delay_seconds": 0, "max_delay_seconds": 0})
+        self.assertEqual(status, 409)
+        self.assertEqual(result["code"], "SEND_ALREADY_RUNNING")
+        status, result = self.request("POST", "/api/send", {"id": draft, "simulate": False})
+        self.assertEqual(status, 403)
+        self.assertEqual(server.DB.list_send_logs(), [])
+
+    def test_restart_marks_current_send_uncertain_and_resume_sends_only_pending(self):
+        first = self.approved_draft("Interrupted current", "current@example.test")
+        second = self.approved_draft("Interrupted pending", "pending@example.test")
+        items = [next(row for row in server.DB.ready_to_send() if row["id"] == first[2]), next(row for row in server.DB.ready_to_send() if row["id"] == second[2])]
+        server.DB.create_send_job("send-resume-fixture", "dental", "SIMULATED_SEND", 2, 0, 0, 50, 50, items)
+        server.DB.confirm_send_job("send-resume-fixture")
+        reserved, reason = server.DB.reserve_send_item("send-resume-fixture", first[2])
+        self.assertIsNone(reason); self.assertIsNotNone(reserved)
+        db_path = server.DB.path
+        server.DB.close(); server.DB = server.Database(db_path); server.DB.recover_interrupted_jobs()
+        interrupted = server.DB.get_send_job("send-resume-fixture")
+        self.assertEqual(interrupted["status"], "SEND_INTERRUPTED")
+        self.assertEqual(interrupted["items"][0]["status"], "UNCERTAIN")
+        self.assertEqual(interrupted["items"][1]["status"], "PENDING")
+        self.assertEqual(server.DB.get_draft(first[2])["status"], "SEND_INTERRUPTED")
+        self.assertEqual(server.DB.get_draft(second[2])["status"], "APPROVED")
+        status, result = self.request("POST", "/api/send-batches/send-resume-fixture/resume", {})
+        self.assertEqual(status, 202)
+        final = self.wait_for_job("/api/send-batches", "send-resume-fixture", {"COMPLETED"})
+        self.assertEqual(final["simulated_count"], 1)
+        self.assertEqual(final["items"][0]["status"], "UNCERTAIN")
+        self.assertEqual(final["items"][1]["status"], "SIMULATED_SENT")
 
     def test_analysis_to_review_queue_and_approval_is_persisted_without_send(self):
         evidence = {

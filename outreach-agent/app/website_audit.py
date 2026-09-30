@@ -41,6 +41,11 @@ def audit_website(url: str | None, timeout: int = 8) -> dict:
 
     booking_link = next(((url, label) for url, label in link_text if re.search(r"/(booking|appointments?|reserve|schedule)(?:[/#?]|$)", urlparse(url).path + ("?" if "?" in url else ""), re.I)), None)
     booking_cta = re.search(r"(?i)\b(?:book online|book an appointment|schedule an appointment)\b|записаться онлайн|запишитесь онлайн|записаться на при[её]м", visible_text)
+    if booking_cta:
+        sentence_start = max(visible_text.rfind(mark, 0, booking_cta.start()) for mark in ".!?;:") + 1
+        prefix = visible_text[sentence_start:booking_cta.start()]
+        if re.search(r"(?i)\b(?:not|no|unavailable|disabled|isn't|aren't)\b|не\s+(?:доступ|работ|предусмотр)|отсутств\w*", prefix):
+            booking_cta = None
     booking = booking_link or (("", booking_cta.group(0)) if booking_cta else None)
 
     whatsapp_link = next((url for url in hrefs if (urlparse(url).hostname or "").lower() in {"wa.me", "api.whatsapp.com"} and (urlparse(url).hostname == "wa.me" or urlparse(url).path.lower().startswith("/send"))), None)
@@ -53,12 +58,14 @@ def audit_website(url: str | None, timeout: int = 8) -> dict:
         "booking": (bool(booking), f"Booking action link or CTA: {booking[0] or booking[1]}" if booking else "No booking action link or explicit booking CTA found."),
         "whatsapp": (bool(whatsapp_link), f"WhatsApp action URL: {whatsapp_link}" if whatsapp_link else "No WhatsApp action URL found; a text mention alone is not a link."),
         "online_payment": (bool(payment_link), f"Payment or checkout endpoint: {payment_link}" if payment_link else "No payment or checkout endpoint found."),
-        "ai_assistant": (bool(re.search(r"(chatbot|ai assistant|виртуальн\w+ помощник|чат-бот)", visible_text, re.I)), "AI assistant language detected in page text."),
+        # A generic chat widget or the word "chatbot" does not establish that AI is used.
+        "ai_assistant": (bool(re.search(r"\b(?:ai[- ]powered|artificial intelligence|ai assistant)\b|ии[- ]?ассистент|искусственн\w+ интеллект", visible_text, re.I)), "Explicit AI assistant language detected in page text."),
         "crm": (bool(crm_url), f"CRM integration URL: {crm_url}" if crm_url else "No CRM integration URL found; informational mentions do not confirm CRM use."),
         "automation": (bool(re.search(r"(automated follow.?up|автоматическ\w+ рассыл|автоматизац\w+)", visible_text, re.I)), "Automation language detected in page text."),
         "forms": (bool(re.search(r"<form\b", html, re.I)), "HTML form element found"),
-        "chat": (bool(re.search(r"(tawk|jivo|chatra|intercom|chat-widget)", html, re.I)), "Known chat widget marker found"),
+        "chat_widget": (bool(re.search(r"(tawk|jivo|chatra|intercom|chat-widget|livechat|onlinechat)", html, re.I)), "Known chat widget marker found; AI capability is not implied."),
     }
+    signal_matches["chat"] = signal_matches["chat_widget"]
     signals = {}
     for key, (detected, snippet) in signal_matches.items():
         signals[key] = detected
