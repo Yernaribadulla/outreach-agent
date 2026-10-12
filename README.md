@@ -40,6 +40,12 @@ All people, patients, statistics, addresses, testimonials, and treatment content
 
 The MVP uses Python, SQLite, OpenStreetMap/Nominatim/Overpass discovery, local LM Studio, website audit, entity resolution/deduplication, evidence/provenance, configurable verticals, an autonomous MVP pipeline, and dry-run outreach preparation without real email delivery.
 
+### Dashboard preview
+
+The dashboard presents researched companies as reviewable lead cards with status, location, website, contact data, source provenance, and AI analysis results. The interface is designed for human verification before any outreach action.
+
+![Outreach Agent dashboard showing researched leads](docs/screenshots/outreach-agent-dashboard.png)
+
 ### V2 notes: problems and solutions
 
 V2 is the current development version of the Outreach Agent. Two practical limitations shaped this iteration:
