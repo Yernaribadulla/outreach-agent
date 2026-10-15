@@ -112,6 +112,21 @@ class LMStudioJSONContractTests(unittest.TestCase):
                 self.client.chat_opportunity(self.payload)
             self.assertEqual(len(calls), 2)
 
+    def test_console_encoding_cannot_interrupt_schema_retry(self):
+        candidate = valid_opportunity()
+        candidate.pop("recommended_angle")
+        self.client._request = lambda body: response(json.dumps(candidate, ensure_ascii=False))
+        buffer = io.BytesIO()
+        console = io.TextIOWrapper(buffer, encoding="cp1252", errors="strict", write_through=True)
+        try:
+            with patch("sys.stdout", console), self.assertRaisesRegex(LMStudioError, "after 2 attempts"):
+                self.client.chat_opportunity(self.payload)
+            diagnostic = buffer.getvalue().decode("cp1252")
+            self.assertEqual(diagnostic.count("parser_error="), 2)
+            self.assertIn("\\u0421", diagnostic)
+        finally:
+            console.detach()
+
     def test_invalid_evidence_reference_is_rejected_even_if_json_is_valid(self):
         candidate = valid_opportunity(opportunities=[{"signal": "booking", "rationale": "Book now", "evidence_ids": ["ev-not-sent"]}])
         calls = []

@@ -4,11 +4,21 @@ import json
 import re
 import shutil
 import subprocess
+import sys
 import time
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from .context import build_llm_context
+
+def _log(message: str, *, flush: bool = True) -> None:
+    """Diagnostics must not change model retry behavior on legacy Windows consoles."""
+    try:
+        print(message, flush=flush)
+    except UnicodeEncodeError:
+        encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+        safe = message.encode(encoding, errors="backslashreplace").decode(encoding)
+        print(safe, flush=flush)
 
 
 class LMStudioError(RuntimeError):
@@ -312,10 +322,10 @@ class LMStudioClient:
             try: content = data["choices"][0]["message"]["content"]
             except (KeyError, IndexError, TypeError) as exc: raise LMStudioError("missing content: choices[0].message.content") from exc
             result = _parse_json_object(content)
-            print(f"[LM] clinic={payload.get('clinic', {}).get('name', 'unknown')} model={self.model} latency={time.perf_counter()-started:.2f}s status=success", flush=True)
+            _log(f"[LM] clinic={payload.get('clinic', {}).get('name', 'unknown')} model={self.model} latency={time.perf_counter()-started:.2f}s status=success", flush=True)
             return result
         except Exception as exc:
-            print(f"[LM] clinic={payload.get('clinic', {}).get('name', 'unknown')} model={self.model} latency={time.perf_counter()-started:.2f}s status=fail error={type(exc).__name__}", flush=True)
+            _log(f"[LM] clinic={payload.get('clinic', {}).get('name', 'unknown')} model={self.model} latency={time.perf_counter()-started:.2f}s status=fail error={type(exc).__name__}", flush=True)
             raise
 
     def chat_draft(self, payload: dict) -> dict:
@@ -344,10 +354,10 @@ class LMStudioClient:
                 raise LMStudioError("draft source_observations must be an array of strings")
             if isinstance(result["confidence"], bool) or not isinstance(result["confidence"], (int, float)) or not 0 <= result["confidence"] <= 1:
                 raise LMStudioError("draft confidence must be a number from 0 to 1")
-            print(f"[LM] stage=draft company={(payload.get('clinic') or {}).get('name', 'unknown')} model={self.model} latency={time.perf_counter()-started:.2f}s status=success", flush=True)
+            _log(f"[LM] stage=draft company={(payload.get('clinic') or {}).get('name', 'unknown')} model={self.model} latency={time.perf_counter()-started:.2f}s status=success", flush=True)
             return result
         except Exception as exc:
-            print(f"[LM] stage=draft company={(payload.get('clinic') or {}).get('name', 'unknown')} model={self.model} latency={time.perf_counter()-started:.2f}s status=fail error={type(exc).__name__}", flush=True)
+            _log(f"[LM] stage=draft company={(payload.get('clinic') or {}).get('name', 'unknown')} model={self.model} latency={time.perf_counter()-started:.2f}s status=fail error={type(exc).__name__}", flush=True)
             raise
 
     def _opportunity_request(self, context: dict, *, strict_retry: bool, structured: bool) -> dict:
@@ -391,7 +401,7 @@ class LMStudioClient:
         serialized_context = json.dumps(context, ensure_ascii=False, separators=(",", ":"))
         estimated_tokens = (len(serialized_context) + 3) // 4
         evidence_ids = {str(item.get("evidence_id")) for item in context.get("key_evidence", []) if item.get("evidence_id")}
-        print(
+        _log(
             f"[LM] stage=opportunity model={self.model} context_chars={len(serialized_context)} "
             f"estimated_tokens={estimated_tokens} timeout={READ_TIMEOUT_SECONDS}s "
             f"evidence_count={len(context.get('key_evidence', []))} max_tokens={OPPORTUNITY_MAX_TOKENS}",
@@ -403,7 +413,7 @@ class LMStudioClient:
                 data = self._opportunity_request(context, strict_retry=False, structured=True)
             except StructuredOutputUnsupported:
                 structured = False
-                print(f"[LM] stage=opportunity model={self.model} structured_output=unsupported using=strict_prompt", flush=True)
+                _log(f"[LM] stage=opportunity model={self.model} structured_output=unsupported using=strict_prompt", flush=True)
                 data = self._opportunity_request(context, strict_retry=False, structured=False)
 
             output_content = ""
@@ -426,7 +436,7 @@ class LMStudioClient:
                 except (LMStudioError, ValueError, KeyError, IndexError, TypeError) as exc:
                     last_parser_error = str(exc)[:160]
                     elapsed = time.perf_counter() - started
-                    print(
+                    _log(
                         f"[LM] stage=opportunity model={self.model} elapsed={elapsed:.2f}s "
                         f"response_length={len(output_content)} parser_error={last_parser_error!r} "
                         f"preview={_safe_preview(output_content)!r}",
@@ -438,14 +448,14 @@ class LMStudioClient:
 
             assert result is not None
             result["digital_state"] = _deterministic_digital_state(context)
-            print(
+            _log(
                 f"[LM] stage=opportunity model={self.model} structured_output={'json_schema' if structured else 'unsupported'} "
                 f"status=response_received output_chars={len(output_content)} elapsed={time.perf_counter()-started:.2f}s",
                 flush=True,
             )
             return result
         except Exception as exc:
-            print(
+            _log(
                 f"[LM] stage=opportunity model={self.model} status=fail elapsed={time.perf_counter()-started:.2f}s "
                 f"error={type(exc).__name__}: {str(exc)[:180]}",
                 flush=True,
