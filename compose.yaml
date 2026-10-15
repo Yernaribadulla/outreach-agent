@@ -1,0 +1,19 @@
+services:
+  research:
+    build:
+      context: .
+      dockerfile: Dockerfile.research
+    environment:
+      RESEARCH_HOST: 0.0.0.0
+      RESEARCH_SERVICE_TOKEN: ${RESEARCH_SERVICE_TOKEN:?Set RESEARCH_SERVICE_TOKEN in your shell}
+    ports:
+      - "127.0.0.1:8766:8766"
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8766/healthz', timeout=2)"]
+      interval: 30s
+      timeout: 3s
+      retries: 3

@@ -1,542 +1,440 @@
 <!doctype html>
-<html lang="ru">
+<html lang="ru" data-theme="light">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" content="#233e36" />
     <meta
       name="description"
-      content="DENTARA — точная стоматология, спроектированная вокруг вас."
+      content="DENTARA — концепт современной стоматологии в Алматы. Направления лечения, пространство клиники и демонстрация записи."
     />
-    <title>DENTARA — Точная стоматология</title>
-    <link rel="stylesheet" href="styles.css?v=31b51ff" />
+    <meta property="og:title" content="DENTARA — Внимание к каждой улыбке" />
+    <meta
+      property="og:description"
+      content="Спокойная атмосфера. Понятный план. Внимание к вам. Демонстрационный сайт клиники."
+    />
+    <meta property="og:type" content="website" />
+    <title>DENTARA — Внимание к каждой улыбке</title>
+    <link rel="icon" href="assets/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="styles.css" />
+    <script defer src="js/content.js"></script>
+    <script defer src="js/dialogs.js"></script>
+    <script defer src="js/booking.js"></script>
+    <script defer src="script.js"></script>
   </head>
   <body>
+    <a class="skip-link" href="#main">Перейти к содержанию</a>
     <header class="nav">
-      <a class="brand" href="#top">DENTARA</a>
-      <nav>
-        <a href="#about">О клинике</a><a href="#services">Услуги</a
-        ><a href="#doctors">Врачи</a><a href="#technology">Технологии</a
-        ><a href="#faq">FAQ</a><a href="#contacts">Контакты</a>
-      </nav>
-      <button
-        class="theme-toggle"
-        type="button"
-        data-theme-toggle
-        aria-label="Переключить тему"
+      <a class="brand" href="#top" aria-label="DENTARA — на главную"
+        >DENTARA<span>DENTAL STUDIO</span></a
       >
-        Тёмная тема</button
-      ><button class="nav-cta" data-book>
-        Записаться
-        <svg
-          class="icon-arrow"
-          aria-hidden="true"
-          viewBox="0 0 24 24"
-          focusable="false"
-        >
-          <path d="M5 19 19 5M8 5h11v11" />
-        </svg></button
-      ><button class="hamb" aria-label="Открыть меню"><i></i><i></i></button>
-    </header>
-    <aside class="mobile-menu">
-      <div class="mobile-head">
-        <span class="brand">DENTARA</span><button class="close-menu">×</button>
-      </div>
-      <nav>
-        <a href="#about"
-          >О клинике
-          <b
-            ><svg
-              class="icon-arrow"
-              aria-hidden="true"
-              viewBox="0 0 24 24"
-              focusable="false"
-            >
-              <path d="M5 19 19 5M8 5h11v11" /></svg></b></a
-        ><a href="#services"
-          >Услуги
-          <b
-            ><svg
-              class="icon-arrow"
-              aria-hidden="true"
-              viewBox="0 0 24 24"
-              focusable="false"
-            >
-              <path d="M5 19 19 5M8 5h11v11" /></svg></b></a
-        ><a href="#doctors"
-          >Врачи
-          <b
-            ><svg
-              class="icon-arrow"
-              aria-hidden="true"
-              viewBox="0 0 24 24"
-              focusable="false"
-            >
-              <path d="M5 19 19 5M8 5h11v11" /></svg></b></a
-        ><a href="#technology"
-          >Технологии
-          <b
-            ><svg
-              class="icon-arrow"
-              aria-hidden="true"
-              viewBox="0 0 24 24"
-              focusable="false"
-            >
-              <path d="M5 19 19 5M8 5h11v11" /></svg></b></a
-        ><a href="#journey"
-          >Путь пациента
-          <b
-            ><svg
-              class="icon-arrow"
-              aria-hidden="true"
-              viewBox="0 0 24 24"
-              focusable="false"
-            >
-              <path d="M5 19 19 5M8 5h11v11" /></svg></b></a
-        ><a href="#faq"
-          >FAQ
-          <b
-            ><svg
-              class="icon-arrow"
-              aria-hidden="true"
-              viewBox="0 0 24 24"
-              focusable="false"
-            >
-              <path d="M5 19 19 5M8 5h11v11" /></svg></b></a
-        ><a href="#contacts"
-          >Контакты
-          <b
-            ><svg
-              class="icon-arrow"
-              aria-hidden="true"
-              viewBox="0 0 24 24"
-              focusable="false"
-            >
-              <path d="M5 19 19 5M8 5h11v11" /></svg></b
-        ></a>
+      <nav aria-label="Основная навигация">
+        <a href="#about">Философия</a><a href="#services">Услуги</a
+        ><a href="#space">Клиника</a><a href="#faq">Вопросы</a>
       </nav>
-      <button class="btn" data-book>
-        Записаться на приём
-        <svg
-          class="icon-arrow"
-          aria-hidden="true"
-          viewBox="0 0 24 24"
-          focusable="false"
+      <div class="nav-actions">
+        <button
+          class="theme-toggle"
+          type="button"
+          data-theme-toggle
+          aria-label="Включить тёмную тему"
+          aria-pressed="false"
         >
-          <path d="M5 19 19 5M8 5h11v11" />
-        </svg>
-      </button>
-    </aside>
-    <main id="top">
-      <section class="hero">
-        <div class="grid"></div>
-        <div class="hero-copy reveal">
-          <p class="eyebrow">Клиника нового поколения <span>·</span> Алматы</p>
-          <h1>Точная<br /><em>стоматология.</em></h1>
-          <p>
-            Мы создаём спокойный и предсказуемый путь к здоровой улыбке — с
-            уважением к вашему времени, ритму и индивидуальности.
-          </p>
-          <div class="offer">
-            <b>Первичная консультация — 0 ₸</b
-            ><span>при записи до конца месяца</span>
-          </div>
-          <ul class="hero-benefits">
-            <li>Цифровая диагностика и понятный план</li>
-            <li>Специалисты для всей семьи</li>
-            <li>Рассрочка через Kaspi Bank</li>
-          </ul>
-          <div class="actions">
-            <button class="btn" data-book>
-              Записаться на консультацию
-              <svg
-                class="icon-arrow"
-                aria-hidden="true"
-                viewBox="0 0 24 24"
-                focusable="false"
-              >
-                <path d="M5 19 19 5M8 5h11v11" />
-              </svg></button
-            ><a href="https://wa.me/111111111111" class="text-link"
-              >Написать в WhatsApp
-              <svg
-                class="icon-arrow"
-                aria-hidden="true"
-                viewBox="0 0 24 24"
-                focusable="false"
-              >
-                <path d="M5 19 19 5M8 5h11v11" /></svg
-            ></a>
-          </div>
-        </div>
-        <div class="hero-art">
-          <div class="portrait">
-            <span class="portrait-mark" aria-hidden="true"></span
-            ><small>01 / 04</small>
-          </div>
-          <div class="float stat">
-            <b>97%</b>удовлетворённость<br />пациентов
-          </div>
-          <div class="float available">
-            <span class="status-dot" aria-hidden="true"></span> Приём
-            доступен<br /><b>сегодня</b>
-          </div>
-        </div>
-        <div class="scroll">Листайте, чтобы исследовать <i></i></div>
-      </section>
-      <div class="marquee">
-        <div>
-          Рассрочка через Kaspi Bank <i>·</i> Первичная консультация
-          <i>·</i> Современная диагностика <i>·</i> Индивидуальный план лечения
-          <i>·</i> Рассрочка через Kaspi Bank <i>·</i> Первичная консультация
-          <i>·</i>
-        </div>
+          ◐</button
+        ><button class="nav-cta" type="button" data-book>
+          Записаться <span aria-hidden="true">↗</span></button
+        ><button
+          class="hamb"
+          type="button"
+          aria-label="Открыть меню"
+          aria-expanded="false"
+          aria-controls="mobile-menu"
+        >
+          <span></span><span></span>
+        </button>
       </div>
-      <section class="metrics">
-        <p class="label">DENTARA / В ЦИФРАХ</p>
-        <div class="metric-grid">
-          <div>
-            <b data-count="12">0<small>+</small></b
-            ><span>лет опыта</span>
+    </header>
+    <dialog id="mobile-menu" class="mobile-menu" aria-labelledby="menu-title">
+      <div class="mobile-head">
+        <span id="menu-title" class="brand">DENTARA</span
+        ><button class="x" type="button" data-close aria-label="Закрыть меню">
+          ×
+        </button>
+      </div>
+      <p class="eyebrow">Внимание к каждой улыбке</p>
+      <nav aria-label="Мобильная навигация">
+        <a href="#about">Философия <span>01</span></a
+        ><a href="#services">Услуги <span>02</span></a
+        ><a href="#space">Клиника <span>03</span></a
+        ><a href="#journey">Первый визит <span>04</span></a
+        ><a href="#faq">Вопросы <span>05</span></a
+        ><a href="#contacts">Контакты <span>06</span></a>
+      </nav>
+      <button class="btn" type="button" data-book>
+        Познакомиться с клиникой <span aria-hidden="true">↗</span>
+      </button>
+    </dialog>
+    <main id="main" tabindex="-1">
+      <section id="top" class="hero" aria-labelledby="hero-title">
+        <div class="hero-copy">
+          <p class="eyebrow">
+            <span class="status-dot" aria-hidden="true"></span> Стоматология с
+            вниманием к вам / Алматы
+          </p>
+          <h1 id="hero-title">
+            Забота, которую<br />чувствуешь.<br /><em
+              >Улыбка, которая<br />остаётся.</em
+            >
+          </h1>
+          <p class="hero-description">
+            Спокойная атмосфера, точная диагностика и понятный план. Чтобы
+            забота о себе начиналась с доверия.
+          </p>
+          <div class="actions">
+            <button class="btn btn-light" type="button" data-book>
+              Начать с консультации <span aria-hidden="true">↗</span></button
+            ><a class="text-link" href="#services"
+              >Выбрать услугу <span aria-hidden="true">↓</span></a
+            >
           </div>
-          <div>
-            <b data-count="18000">0<small>+</small></b
-            ><span>пациентов</span>
-          </div>
-          <div>
-            <b data-count="97">0<small>%</small></b
-            ><span>довольны результатом</span>
-          </div>
-          <div>
-            <b data-count="24">0<small>/7</small></b
-            ><span>экстренная связь</span>
-          </div>
+          <p class="hero-note">DENTARA — демонстрационный концепт клиники</p>
         </div>
-      </section>
-      <section id="about" class="section about">
-        <div class="section-head">
-          <div>
-            <p class="eyebrow">О клинике</p>
-            <h2>Спокойная<br /><em>точность.</em></h2>
+        <figure class="hero-art">
+          <img
+            src="assets/hero-clinic.webp"
+            width="736"
+            height="981"
+            alt="Стоматологическое кресло в спокойном интерьере с геометричным светом"
+            fetchpriority="high"
+            decoding="async"
+          />
+          <figcaption>
+            <span>Пространство для спокойствия</span><span>01 / DENTARA</span>
+          </figcaption>
+          <div class="hero-seal" aria-hidden="true">
+            точность<br /><span>+</span><br />забота
           </div>
+        </figure>
+        <a class="hero-scroll" href="#about"
+          ><span>Знакомство начинается здесь</span
+          ><span aria-hidden="true">↓</span></a
+        >
+      </section>
+      <div class="principles" aria-label="Наш подход">
+        <span>Сначала — вы</span><i aria-hidden="true">✳</i
+        ><span>Понятно на каждом шаге</span><i aria-hidden="true">✳</i
+        ><span>Внимание к деталям</span><i aria-hidden="true">✳</i
+        ><span>Без лишней спешки</span>
+      </div>
+      <section id="about" class="section about" aria-labelledby="about-title">
+        <div class="section-kicker">
+          <p class="eyebrow">01 / Философия</p>
+          <span>Медицина встречает человечность</span>
         </div>
         <div class="about-grid">
+          <h2 id="about-title">
+            Хорошая стоматология<br />начинается<br /><em>с умения слушать.</em>
+          </h2>
           <div class="about-copy">
             <p>
-              Мы объединили медицинскую экспертизу, цифровую диагностику и
-              внимательный сервис, чтобы лечение было понятным на каждом шаге. В
-              DENTARA нет лишней спешки и сложных слов: вместе с вами собираем
-              реалистичный маршрут — от первой встречи до поддержания
-              результата.
+              У каждого своя история. Кто-то приходит на привычный осмотр,
+              кто-то решается на первый визит за несколько лет. Здесь для обеих
+              историй есть место.
             </p>
-            <div class="about-points">
-              <span><b>01</b>План лечения на понятном языке</span
-              ><span><b>02</b>Деликатная атмосфера без давления</span
-              ><span><b>03</b>Оборудование для точной диагностики</span>
-            </div>
-          </div>
-          <div class="gallery">
-            <div class="gallery-main" data-gallery-main>
-              <span>Пространство клиники</span>
-            </div>
-            <div class="gallery-thumbs">
-              <button class="active" data-gallery="0">01</button
-              ><button data-gallery="1">02</button
-              ><button data-gallery="2">03</button
-              ><button data-gallery="3">04</button>
-            </div>
+            <p>
+              Мы задумали DENTARA как пространство, где вам объясняют, дают
+              время задать вопросы и вместе выбирают следующий шаг.
+            </p>
+            <a class="inline-link" href="#journey"
+              >Как проходит первый визит <span aria-hidden="true">↗</span></a
+            >
           </div>
         </div>
+        <div class="values">
+          <article>
+            <span>01</span>
+            <h3>В вашем ритме</h3>
+            <p>
+              Начать со знакомства. Обсудить ожидания. Почувствовать себя
+              спокойно.
+            </p>
+          </article>
+          <article>
+            <span>02</span>
+            <h3>На понятном языке</h3>
+            <p>
+              Разобраться в вариантах, этапах и стоимости до принятия решения.
+            </p>
+          </article>
+          <article>
+            <span>03</span>
+            <h3>С общей картиной</h3>
+            <p>
+              Собрать диагностику и пожелания в последовательный план заботы.
+            </p>
+          </article>
+        </div>
       </section>
-      <section id="services" class="section">
+      <section
+        id="services"
+        class="section services-section"
+        aria-labelledby="services-title"
+      >
         <div class="section-head">
           <div>
-            <p class="eyebrow">01 — Направления</p>
-            <h2>Ваша улыбка.<br /><em>Наше внимание.</em></h2>
+            <p class="eyebrow">02 / Направления заботы</p>
+            <h2 id="services-title">
+              Разные задачи.<br /><em>Одинаковое внимание.</em>
+            </h2>
           </div>
           <p>
-            От первой консультации до финального результата — всё лечение
-            собрано в одном продуманном пространстве.
+            От профилактики до восстановления улыбки. Выберите направление,
+            чтобы узнать больше.
           </p>
         </div>
         <div class="services">
-          <div class="service-list"></div>
-          <div class="service-detail">
-            <div class="service-visual">
-              <span>ХИРУРГИЯ / DENTARA</span><b>◌</b>
-            </div>
-            <div class="detail-copy">
-              <p class="eyebrow">Хирургия / DENTARA</p>
-              <h3>Имплантация</h3>
-              <p>
-                Восстанавливаем эстетику и функцию с опорой на цифровую
-                диагностику.
-              </p>
-              <div class="meta">
-                <span><small>Продолжительность</small>от 3 месяцев</span
-                ><span><small>Стоимость</small>от 185 000 ₸</span>
-              </div>
-              <button class="arrow" data-book>
-                Обсудить с врачом
-                <svg
-                  class="icon-arrow"
-                  aria-hidden="true"
-                  viewBox="0 0 24 24"
-                  focusable="false"
-                >
-                  <path d="M5 19 19 5M8 5h11v11" />
-                </svg>
-              </button>
-            </div>
+          <div class="service-list" aria-label="Направления лечения"></div>
+          <article
+            class="service-detail"
+            id="service-detail"
+            aria-live="polite"
+            aria-atomic="true"
+          ></article>
+        </div>
+        <p class="caption">
+          Услуги и цены показаны для демонстрации интерфейса. Это не публичная
+          оферта; индивидуальный план определяет врач.
+        </p>
+        <noscript
+          ><p>
+            Направления: профилактика, имплантация, ортодонтия и дизайн улыбки.
+            Для интерактивной демонстрации включите JavaScript.
+          </p></noscript
+        >
+      </section>
+      <section id="space" class="space" aria-labelledby="space-title">
+        <div class="space-image">
+          <img
+            id="gallery-image"
+            src="assets/clinic-space.webp"
+            width="736"
+            height="1104"
+            alt="Иллюстративное пространство стоматологической клиники"
+            loading="lazy"
+            decoding="async"
+          /><span class="image-index" aria-hidden="true">D / 03</span>
+        </div>
+        <div class="space-copy">
+          <p class="eyebrow">03 / Пространство</p>
+          <h2 id="space-title">Можно просто<br /><em>выдохнуть.</em></h2>
+          <p>
+            Мягкий свет. Чистые линии. Внимание к деталям. Мы верим: окружение —
+            тоже часть заботы.
+          </p>
+          <div class="gallery-thumbs" aria-label="Фотографии концепта клиники">
+            <button
+              type="button"
+              data-gallery="0"
+              aria-pressed="true"
+              aria-label="Показать пространство клиники"
+            >
+              01 <span>Пространство</span></button
+            ><button
+              type="button"
+              data-gallery="1"
+              aria-pressed="false"
+              aria-label="Показать кабинет"
+            >
+              02 <span>Кабинет</span></button
+            ><button
+              type="button"
+              data-gallery="2"
+              aria-pressed="false"
+              aria-label="Показать детали"
+            >
+              03 <span>Детали</span>
+            </button>
           </div>
+          <p id="gallery-caption" class="caption" aria-live="polite">
+            Пространство клиники · иллюстративное фото
+          </p>
         </div>
       </section>
-      <section class="section case">
+      <section
+        id="technology"
+        class="section technology"
+        aria-labelledby="technology-title"
+      >
+        <div class="technology-copy">
+          <p class="eyebrow">04 / Осознанный подход</p>
+          <h2 id="technology-title">
+            Меньше неизвестного.<br /><em>Больше понимания.</em>
+          </h2>
+          <p>
+            Цифровые инструменты помогают обсуждать лечение наглядно: видеть
+            детали, рассматривать варианты и задавать точные вопросы.
+          </p>
+          <a href="#journey" class="inline-link"
+            >От знакомства к плану <span aria-hidden="true">↗</span></a
+          >
+        </div>
+        <figure>
+          <img
+            src="assets/dental-detail.webp"
+            width="800"
+            height="800"
+            loading="lazy"
+            decoding="async"
+            alt="Стоматологическая деталь для визуального обсуждения лечения"
+          />
+          <figcaption>Детали, из которых складывается общая картина</figcaption>
+        </figure>
+      </section>
+      <section
+        id="journey"
+        class="section journey"
+        aria-labelledby="journey-title"
+      >
         <div class="section-head">
           <div>
-            <p class="eyebrow">02 — Визуальный пример</p>
-            <h2>Изменения,<br /><em>которые видно.</em></h2>
-            <p class="section-support">
-              Редакционный пример для знакомства с эстетикой цифровой
-              стоматологии.
+            <p class="eyebrow">05 / Первый визит</p>
+            <h2 id="journey-title">Начнём<br /><em>со знакомства.</em></h2>
+          </div>
+          <p>
+            Вам не нужно разбираться во всём заранее. Первый шаг — просто
+            рассказать, что вас волнует.
+          </p>
+        </div>
+        <ol class="journey-grid">
+          <li>
+            <span>01 / Знакомство</span>
+            <h3>Расскажите о себе</h3>
+            <p>Обсудим пожелания, прошлый опыт и то, что важно именно вам.</p>
+          </li>
+          <li>
+            <span>02 / Понимание</span>
+            <h3>Увидим картину</h3>
+            <p>
+              Осмотр и необходимая диагностика помогут разобраться в задаче.
             </p>
-          </div>
-        </div>
-        <div class="compare">
-          <div class="after">
-            <div
-              class="compare-media"
-              role="img"
-              aria-label="Изображение после лечения"
-            ></div>
-            <strong>ПОСЛЕ</strong>
-          </div>
-          <div class="before">
-            <div
-              class="compare-media"
-              role="img"
-              aria-label="Изображение до лечения"
-            ></div>
-            <strong>ДО</strong>
-          </div>
-          <input
-            type="range"
-            min="0"
-            max="100"
-            value="52"
-            aria-label="Сравнить изображения до и после"
-          /><i class="handle" aria-hidden="true"></i>
-        </div>
+          </li>
+          <li>
+            <span>03 / Решение</span>
+            <h3>Выберем следующий шаг</h3>
+            <p>
+              Вместе обсудим варианты, этапы и бюджет. С пространством для
+              вопросов.
+            </p>
+          </li>
+        </ol>
+        <button class="btn" type="button" data-book>
+          Попробовать запись <span aria-hidden="true">↗</span>
+        </button>
       </section>
-      <section id="doctors" class="section doctors">
-        <div class="section-head">
-          <div>
-            <p class="eyebrow">03 — Направления</p>
-            <h2>Ваш путь<br /><em>к улыбке.</em></h2>
-          </div>
-          <p>
-            Выберите направление, чтобы посмотреть, какие задачи помогает решить
-            DENTARA и как может выглядеть ваш маршрут лечения.
-          </p>
-        </div>
-        <div class="doctor-grid"></div>
-      </section>
-      <section id="technology" class="tech">
-        <div class="grid"></div>
-        <div class="tech-copy">
-          <p class="eyebrow">04 — Технологии</p>
-          <h2>Технология<br /><em>для спокойствия.</em></h2>
-          <p>
-            Каждое решение мы проверяем данными: от первого 3D-скана до
-            финальной примерки реставрации.
-          </p>
-          <a href="#journey" class="text-link">Как это работает </a>
-        </div>
-        <div class="console">
-          <div>SCAN / 3D-0428 <span>LIVE</span></div>
-          <div class="scan">
-            <span class="scan-mark" aria-hidden="true"></span><i>+ 32.4°</i
-            ><b>4.8 mm</b>
-          </div>
-          <div>Точность сканирования <strong>99.8%</strong></div>
-        </div>
-      </section>
-      <section id="journey" class="section journey">
-        <div class="section-head">
-          <div>
-            <p class="eyebrow">05 — Путь пациента</p>
-            <h2>От первого шага<br /><em>до новой привычки.</em></h2>
-          </div>
-        </div>
-        <div class="journey-grid"></div>
-      </section>
-      <section class="section smile">
+      <section id="faq" class="section faq" aria-labelledby="faq-title">
         <div>
-          <p class="eyebrow">06 — Smile preview</p>
-          <h2>Улыбка, которая<br /><em>остаётся вашей.</em></h2>
-          <p>
-            Выберите настроение, чтобы увидеть иллюстративную визуализацию. Это
-            не медицинский прогноз.
-          </p>
-          <div class="tabs"></div>
+          <p class="eyebrow">06 / Есть вопросы?</p>
+          <h2 id="faq-title">Давайте<br /><em>разберёмся.</em></h2>
+          <p>Немного ясности<br />перед первым шагом.</p>
         </div>
-        <div class="smile-preview">
-          <span class="smile-mark" aria-hidden="true"></span
-          ><small>ILLUSTRATIVE PREVIEW</small>
+        <div class="faq-list">
+          <details>
+            <summary>Как проходит первая консультация?</summary>
+            <p>
+              В концепции DENTARA визит начинается со знакомства и обсуждения
+              пожеланий. Врач проводит осмотр, объясняет, нужна ли
+              дополнительная диагностика, и обсуждает возможные следующие шаги.
+            </p>
+          </details>
+          <details>
+            <summary>Можно ли сначала узнать стоимость?</summary>
+            <p>
+              В разделе услуг показаны демонстрационные ориентиры. В реальной
+              клинике точную стоимость согласуют после осмотра и выбора плана
+              лечения.
+            </p>
+          </details>
+          <details>
+            <summary>Что делать, если я боюсь стоматолога?</summary>
+            <p>
+              Расскажите об этом при записи и на консультации. Обсудите с
+              врачом, что поможет чувствовать себя спокойнее, как будут
+              проходить процедуры и когда можно сделать паузу.
+            </p>
+          </details>
+          <details>
+            <summary>Можно ли записаться через этот сайт?</summary>
+            <p>
+              Здесь можно пройти демонстрацию записи. Данные остаются только в
+              открытой форме: сайт не передаёт их клинике и не создаёт реальный
+              приём.
+            </p>
+          </details>
+          <details>
+            <summary>Где найти контакты клиники?</summary>
+            <p>
+              DENTARA — вымышленная клиника. До запуска реального проекта
+              владелец должен добавить подтверждённые адрес, телефон, часы
+              работы и сведения о специалистах.
+            </p>
+          </details>
         </div>
       </section>
-      <section id="faq" class="section faq">
-        <div>
-          <p class="eyebrow">07 — FAQ</p>
-          <h2>Частые<br /><em>вопросы.</em></h2>
-        </div>
-        <div class="faq-list"></div>
-      </section>
-      <section id="contacts" class="section contacts">
-        <div class="section-head">
-          <div>
-            <p class="eyebrow">08 — Контакты</p>
-            <h2>Будем<br /><em>на связи.</em></h2>
-          </div>
-          <p>
-            Выберите удобный способ — администратор ответит и поможет подобрать
-            время для консультации.
-          </p>
-        </div>
-        <div class="contact-grid">
-          <div class="contact-info">
-            <a href="tel:+111111111111">+1 111 111 1111</a
-            ><a href="https://wa.me/111111111111"
-              >Написать в WhatsApp
-              <svg
-                class="icon-arrow"
-                aria-hidden="true"
-                viewBox="0 0 24 24"
-                focusable="false"
-              >
-                <path d="M5 19 19 5M8 5h11v11" /></svg
-            ></a>
-            <p>Алматы, ул. Достык, 132<br />Пн–Сб, 08:00–21:00</p>
-            <a
-              class="route"
-              href="https://www.google.com/maps/search/?api=1&query=Almaty+Dostyk+132"
-              target="_blank"
-              >Построить маршрут
-              <svg
-                class="icon-arrow"
-                aria-hidden="true"
-                viewBox="0 0 24 24"
-                focusable="false"
-              >
-                <path d="M5 19 19 5M8 5h11v11" /></svg
-            ></a>
-          </div>
-          <div class="map-card">
-            <iframe
-              title="Карта расположения DENTARA"
-              loading="lazy"
-              referrerpolicy="no-referrer-when-downgrade"
-              src="https://www.google.com/maps?q=43.2389,76.8897&amp;z=16&amp;output=embed"
-            ></iframe>
-          </div>
-        </div>
+      <section
+        id="contacts"
+        class="section contact-section"
+        aria-labelledby="contact-title"
+      >
+        <p class="eyebrow">07 / Ваш следующий шаг</p>
+        <h2 id="contact-title">
+          Выделите время<br /><em>для своей улыбки.</em>
+        </h2>
+        <p>
+          Познакомьтесь с простым сценарием записи.<br />Без звонков, ожидания и
+          отправки личных данных.
+        </p>
+        <button class="btn btn-light" type="button" data-book>
+          Открыть демо записи <span aria-hidden="true">↗</span></button
+        ><span class="contact-location">АЛМАТЫ · КОНЦЕПТ КЛИНИКИ</span>
       </section>
     </main>
     <footer>
       <div class="footer-top">
-        <div>
-          <span class="brand">DENTARA</span>
-          <h2>Время для<br /><em>своей улыбки.</em></h2>
-          <button class="btn" data-book>
-            Записаться на приём
-            <svg
-              class="icon-arrow"
-              aria-hidden="true"
-              viewBox="0 0 24 24"
-              focusable="false"
-            >
-              <path d="M5 19 19 5M8 5h11v11" />
-            </svg>
-          </button>
-        </div>
-        <div class="footer-links">
-          <div>
-            <small>Навигация</small><a href="#services">Услуги</a
-            ><a href="#doctors">Врачи</a><a href="#technology">Технологии</a
-            ><a href="#faq">FAQ</a>
-          </div>
-          <div>
-            <small>Контакты</small
-            ><a href="tel:+111111111111">+1 111 111 1111</a
-            ><a href="mailto:hello@dentara.demo">hello@dentara.demo</a>
-            <p>Алматы, ул. Достык, 132<br />Пн–Сб, 08:00–21:00</p>
-          </div>
-        </div>
+        <a class="brand" href="#top">DENTARA<span>DENTAL STUDIO</span></a>
+        <p>С точностью к деталям.<br />С вниманием к вам.</p>
+        <nav aria-label="Навигация в подвале">
+          <a href="#services">Услуги</a><a href="#space">Клиника</a
+          ><a href="#faq">Вопросы</a><a href="#contacts">Контакты</a>
+        </nav>
+        <a class="back-top" href="#top" aria-label="Вернуться наверх">↑</a>
       </div>
       <div class="footer-bottom">
-        © 2024 DENTARA / DEMO PROJECT
-        <span>Не является медицинской рекомендацией</span
-        ><span
-          >Instagram
-          <svg
-            class="icon-arrow"
-            aria-hidden="true"
-            viewBox="0 0 24 24"
-            focusable="false"
-          >
-            <path d="M5 19 19 5M8 5h11v11" /></svg
-        ></span>
+        <span>© <span data-year>2026</span> DENTARA · DEMO CONCEPT</span>
+        <p>
+          Вымышленная клиника. Иллюстративные материалы. Не является медицинской
+          рекомендацией.
+        </p>
       </div>
     </footer>
-    <div class="modal-layer" id="doctor-modal">
-      <div
-        class="modal doctor-modal"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="direction-title"
-      >
-        <button class="x" type="button" aria-label="Закрыть">×</button>
-        <div class="modal-avatar" aria-hidden="true"></div>
-        <p class="eyebrow"></p>
-        <h2 id="direction-title"></h2>
-        <p class="bio"></p>
-        <div class="facts">
-          <span><small>Фокус направления</small></span
-          ><span><small>Формат</small>Индивидуальный план</span>
-        </div>
-        <button class="btn" data-book>
-          Обсудить направление
-          <svg
-            class="icon-arrow"
-            aria-hidden="true"
-            viewBox="0 0 24 24"
-            focusable="false"
-          >
-            <path d="M5 19 19 5M8 5h11v11" />
-          </svg>
-        </button>
+    <dialog
+      id="booking-modal"
+      class="booking"
+      aria-labelledby="booking-title"
+      aria-describedby="booking-note"
+    >
+      <button class="x" type="button" data-close aria-label="Закрыть запись">
+        ×
+      </button>
+      <div class="booking-top">
+        <span class="eyebrow">Знакомство с DENTARA</span
+        ><span data-booking-progress>01 / 03</span>
       </div>
-    </div>
-    <div class="modal-layer" id="booking-modal">
-      <div class="modal booking">
-        <button class="x" type="button" aria-label="Закрыть">×</button>
-        <div class="booking-top">
-          <span class="eyebrow">Запись на приём</span><b><em>01</em> / 03</b>
-        </div>
-        <div class="booking-body"></div>
-        <button class="back" type="button">
-          <svg
-            class="icon-arrow icon-arrow-back"
-            aria-hidden="true"
-            viewBox="0 0 24 24"
-            focusable="false"
-          >
-            <path d="M19 12H5m7-6-6 6 6 6" />
-          </svg>
-          Назад
-        </button>
-      </div>
-    </div>
-    <div class="toast"></div>
-    <script src="script.js?v=31b51ff"></script>
+      <p id="booking-note" class="demo-note">
+        Демонстрация · ничего не отправляется
+      </p>
+      <div class="booking-body"></div>
+      <button class="back" type="button">← Назад</button>
+    </dialog>
   </body>
 </html>

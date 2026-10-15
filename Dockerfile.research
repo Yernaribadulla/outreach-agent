@@ -1,0 +1,7 @@
+FROM python:3.14-slim
+WORKDIR /app
+COPY outreach-agent/app ./app
+RUN useradd --create-home app
+USER app
+EXPOSE 8766
+CMD ["python", "-m", "app.research.server"]

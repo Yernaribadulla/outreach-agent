@@ -10,13 +10,15 @@ import time
 import uuid
 from datetime import datetime, timezone
 from html import escape
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 import smtplib
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+from app.http_api import JsonHandler
+from app.config import load_env
 from app.analysis.lm_studio import LMStudioClient
 from app.discovery.public_search import discover_candidates, mock_candidates
 from app.discovery.datasets import curated_candidates
@@ -42,16 +44,6 @@ BATCH_LOCK = threading.Lock()
 SEND_LOCK = threading.Lock()
 SENDING_DRAFTS: set[int] = set()
 SEND_STOP_EVENTS: dict[str, threading.Event] = {}
-
-
-def load_env() -> dict[str, str]:
-    env = dict(os.environ)
-    path = ROOT / ".env"
-    if path.exists():
-        for line in path.read_text(encoding="utf-8").splitlines():
-            if line.strip() and not line.lstrip().startswith("#") and "=" in line:
-                key, value = line.split("=", 1); env.setdefault(key.strip(), value.strip())
-    return env
 
 
 def config(env: dict[str, str], vertical: str = "dental") -> dict[str, str]:
@@ -436,7 +428,9 @@ def _night_batch_worker(batch_id: str) -> None:
             try: profile = json.loads(clinic["profile_json"] or "{}")
             except (TypeError, json.JSONDecodeError): profile = {}
             profile.update({"country": batch.get("country") or profile.get("country") or "", "market": batch.get("market") or profile.get("market") or "", "outreach_language": batch.get("outreach_language") or profile.get("outreach_language") or "en"})
-            db.conn.execute("UPDATE clinics SET profile_json=? WHERE id=?", (json.dumps(profile, ensure_ascii=False), clinic_id))
+            with db.lock:
+                db.conn.execute("UPDATE clinics SET profile_json=? WHERE id=?", (json.dumps(profile, ensure_ascii=False), clinic_id))
+                db.conn.commit()
             if clinic["website"] or profile.get("website_audit") or profile.get("evidence") or profile.get("contacts"):
                 researched += 1
         db.add_batch_discovered_items(batch_id, candidates, researched)
@@ -575,7 +569,9 @@ def _send_worker(send_id: str) -> None:
                     upcoming = pending[index + 1]
                     next_company = upcoming["company_name"]
                     next_send_at = datetime.fromtimestamp(datetime.now(timezone.utc).timestamp() + delay, timezone.utc).isoformat(timespec="seconds")
-                    db.conn.execute("UPDATE send_jobs SET current_company=?,current_recipient=?,next_send_at=?,current_stage='WAITING' WHERE send_id=?", (next_company, upcoming["recipient"], next_send_at, send_id)); db.conn.commit()
+                    with db.lock:
+                        db.conn.execute("UPDATE send_jobs SET current_company=?,current_recipient=?,next_send_at=?,current_stage='WAITING' WHERE send_id=?", (next_company, upcoming["recipient"], next_send_at, send_id))
+                        db.conn.commit()
                     db.add_job_event("send", send_id, "WAITING", f"Waiting {delay} sec for provider rate limits before next message", company_name=str(next_company))
                     if stop_event.wait(delay) or db.send_stop_requested(send_id): terminal = "SEND_INTERRUPTED"
             finally:
@@ -591,9 +587,7 @@ def _send_worker(send_id: str) -> None:
         SEND_STOP_EVENTS.pop(send_id, None)
 
 
-class Handler(BaseHTTPRequestHandler):
-    def json(self, status: int, payload: dict):
-        raw = json.dumps(payload, ensure_ascii=False).encode(); self.send_response(status); self.send_header("Content-Type", "application/json; charset=utf-8"); self.send_header("Content-Length", str(len(raw))); self.end_headers(); self.wfile.write(raw)
+class Handler(JsonHandler):
     def do_GET(self):
         path = urlparse(self.path).path
         if path == "/api/dashboard": return self.json(200, DB.dashboard())
@@ -686,8 +680,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/review.css":
             raw=(UI.parent / "review.css").read_bytes(); self.send_response(200); self.send_header("Content-Type","text/css; charset=utf-8"); self.send_header("Content-Length",str(len(raw))); self.end_headers(); self.wfile.write(raw); return
         self.send_error(404)
-    def body(self): return json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))) or b"{}")
-    def do_POST(self):
+    def post(self):
         path=urlparse(self.path).path; data=self.body()
         if path=="/api/discovery/start":
             try:

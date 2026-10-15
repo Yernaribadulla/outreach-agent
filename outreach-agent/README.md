@@ -2,7 +2,7 @@
 
 Outreach Agent is a working local-first B2B sales-intelligence MVP. It connects public discovery, entity resolution, website audit, evidence/provenance, local Qwen analysis, deterministic qualification, personalized draft generation, human review, and explicitly started sending in one durable SQLite workflow.
 
-The MVP is functional end to end. The code architecture is still evolving and is not yet as clean or modular as a mature production system; see **Technical debt** below.
+See the [repository README](../README.md) for setup, DENTARA, configuration and checks, and [architecture](../docs/architecture.md) for the independent research service and versioned HTTP contracts. This document covers operator workflows.
 
 ## What works
 
@@ -30,6 +30,10 @@ python -m app.server
 Open `http://127.0.0.1:8765`. By default the database is `data/outreach.db`. Override it locally with `OUTREACH_DB_PATH`; override the port with `OUTREACH_PORT`.
 
 LM Studio must expose `http://127.0.0.1:1234/v1` with the exact model `qwen/qwen3-vl-8b`. The application does not switch to a fallback model.
+
+## Optional independent research service
+
+From this directory run `python -m app.research.server` in a second terminal and set `RESEARCH_SERVICE_URL=http://127.0.0.1:8766` for the dashboard. Use the same `RESEARCH_SERVICE_TOKEN` in both processes if configured. Empty service URL retains in-process research. A configured service outage stays `UNKNOWN` and does not silently fall back to local fetching. The research service owns no database, AI analysis or SMTP operations.
 
 ## Evening workflow
 
@@ -99,7 +103,7 @@ The regression suite covers discovery/API contracts, evidence ownership and dedu
 
 ## Technical debt
 
-This is a working local-first MVP, not a finished production platform. Responsibilities are still mixed between the HTTP handler, worker orchestration, SQLite access, and UI rendering. Some historical records use older shapes, configuration loading is intentionally lightweight, and provider integrations remain bounded by public-source availability. Future cleanup should introduce clearer service boundaries, typed API schemas, migrations/versioning, and more isolated worker modules without casually changing the current safety behavior or data model.
+This is a working local-first MVP, not a finished production platform. Responsibilities are still mixed between the HTTP handler, worker orchestration, SQLite access, and UI rendering. Some historical records use older shapes, configuration loading is intentionally lightweight, and provider integrations remain bounded by public-source availability. Website research now has its own service boundary; API orchestration and sending still run together. Further extraction needs durable job contracts, typed API schemas and versioned migrations while preserving the current safety behavior and data model.
 
 Do not enable real SMTP until the intended recipient set, evidence, drafts, provider limits, and confirmation preview have been reviewed by a human.
 

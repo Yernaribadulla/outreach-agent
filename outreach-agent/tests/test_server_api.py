@@ -90,6 +90,25 @@ class DashboardApiTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(dashboard["needs_review"], 1)
 
+    def test_malformed_request_returns_json_and_does_not_mutate_state(self):
+        for raw in (b'{broken', b'[]', b'null', b'\xff'):
+            connection = HTTPConnection("127.0.0.1", self.httpd.server_port, timeout=3)
+            connection.request("POST", "/api/discovery/start", raw, {"Content-Type": "application/json"})
+            response = connection.getresponse()
+            self.assertEqual(response.status, 400)
+            self.assertIn("error", json.loads(response.read()))
+            connection.close()
+        self.assertEqual(server.DB.list_discovery_runs(), [])
+
+    def test_cross_origin_post_is_rejected(self):
+        connection = HTTPConnection("127.0.0.1", self.httpd.server_port, timeout=3)
+        connection.request("POST", "/api/discovery/start", b'{}', {"Content-Type": "application/json", "Origin": "https://other.test"})
+        response = connection.getresponse()
+        self.assertEqual(response.status, 403)
+        response.read()
+        connection.close()
+        self.assertEqual(server.DB.list_discovery_runs(), [])
+
     def test_health_vertical_dashboard_and_batch_contracts(self):
         with patch("app.server.lm_client") as client_factory:
             client_factory.return_value.health.return_value = {"data": [{"id": "qwen/qwen3-vl-8b"}]}

@@ -5,17 +5,18 @@ import time
 from datetime import datetime, timezone
 from html import unescape
 from urllib.parse import urljoin, urlparse
-from urllib.request import Request, urlopen
+from urllib.request import Request
+from .research.network import open_public
 
 
 def _fetch(url: str, timeout: int = 12) -> tuple[str, str, int, float]:
     started = time.perf_counter(); req = Request(url, headers={"User-Agent": "B2B-Lead-Research/1.0"})
-    with urlopen(req, timeout=timeout) as response:
+    with open_public(req, timeout=timeout) as response:
         data = response.read(500_000).decode("utf-8", errors="ignore")
         return data, response.geturl(), getattr(response, "status", 200), round(time.perf_counter() - started, 3)
 
 
-def audit_website(url: str | None, timeout: int = 8) -> dict:
+def audit_website_local(url: str | None, timeout: int = 8) -> dict:
     if not url: return {"website_status": "NO_WEBSITE_FOUND", "status": "UNKNOWN", "evidence": [], "source": None}
     target = url if url.startswith("http") else "https://" + url
     observed_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -73,3 +74,19 @@ def audit_website(url: str | None, timeout: int = 8) -> dict:
     missing_quality = int(not title) + int(not meta) + int(not signals["mobile_friendly"])
     status = "WEBSITE_WEAK" if missing_quality >= 2 else "WEBSITE_OK"
     return {"website_status": status, "status": "CONFIRMED", "url": final_url, "http_status": http_status, "https": final_url.startswith("https://"), "response_time": response_time, "title": title, "meta_description": unescape(meta.group(1)).strip() if meta else "", "internal_links": len(internal), "page_size": len(html.encode("utf-8")), "signals": signals, "evidence": evidence, "source": final_url}
+
+
+def audit_website(url: str | None, timeout: int = 8) -> dict:
+    """Use the configured research service, or the in-process adapter for local use."""
+    from .research.client import ResearchUnavailable, request_research, service_url
+    if not url or not service_url():
+        return audit_website_local(url, timeout)
+    try:
+        return request_research("audit", url, timeout)
+    except ResearchUnavailable:
+        return {"website_status": "WEBSITE_UNAVAILABLE", "status": "UNKNOWN", "url": url,
+                "error": "Research service is unavailable.", "source": url,
+                "evidence": [{"status": "UNKNOWN", "fact": "Website could not be inspected",
+                              "source": url, "confidence": "LOW",
+                              "observed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                              "detection_reason": "Research service unavailable; no feature conclusion can be drawn."}]}

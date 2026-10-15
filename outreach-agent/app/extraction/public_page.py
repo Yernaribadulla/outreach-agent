@@ -3,7 +3,8 @@ from __future__ import annotations
 import re
 from html import unescape
 from urllib.parse import urljoin, urlparse
-from urllib.request import Request, urlopen
+from urllib.request import Request
+from ..research.network import open_public
 
 EMAIL_RE = re.compile(r"(?i)\b[a-z0-9._%+\-]+@(?!example\.)[a-z0-9.\-]+\.[a-z]{2,}\b")
 GENERIC_PREFIXES = ("info", "contact", "hello", "clinic", "admin", "booking", "office", "reception")
@@ -11,7 +12,7 @@ GENERIC_PREFIXES = ("info", "contact", "hello", "clinic", "admin", "booking", "o
 
 def fetch(url: str, timeout: int = 12) -> tuple[str, str]:
     req = Request(url, headers={"User-Agent": "B2B-Outreach-Research/1.0"})
-    with urlopen(req, timeout=timeout) as response:
+    with open_public(req, timeout=timeout) as response:
         content_type = response.headers.get("content-type", "")
         if "text/html" not in content_type: return "", response.geturl()
         return response.read(500_000).decode("utf-8", errors="ignore"), response.geturl()
@@ -40,11 +41,11 @@ def contact_urls(website: str) -> list[str]:
     return [base, urljoin(root, "/contact"), urljoin(root, "/about"), urljoin(root, "/contact-us")]
 
 
-def inspect_site(website: str) -> dict:
+def inspect_site_local(website: str, timeout: int = 12) -> dict:
     pages = []; errors = []
     for url in contact_urls(website):
         try:
-            html, final_url = fetch(url)
+            html, final_url = fetch(url, timeout=timeout)
             if html: pages.append({"url": final_url, "text": visible_text(html), "contacts": extract_business_contacts(html, final_url)})
         except Exception as exc:
             errors.append({"url": url, "error": str(exc)[:160]})
@@ -55,3 +56,14 @@ def inspect_site(website: str) -> dict:
         for contact in page["contacts"]:
             if contact["email"] not in seen: contacts.append(contact); seen.add(contact["email"])
     return {"website": website, "pages": pages, "contacts": contacts, "errors": errors, "text": "\n".join(p["text"] for p in pages)[:12000]}
+
+
+def inspect_site(website: str) -> dict:
+    from ..research.client import ResearchUnavailable, request_research, service_url
+    if not service_url():
+        return inspect_site_local(website)
+    try:
+        return request_research("inspect", website, timeout=12)
+    except ResearchUnavailable:
+        return {"website": website, "pages": [], "contacts": [], "text": "",
+                "errors": [{"url": website, "error": "Research service is unavailable."}]}
